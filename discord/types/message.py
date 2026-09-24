@@ -186,7 +186,7 @@ class MessageSnapshot(TypedDict):
     flags: NotRequired[int]
     mentions: List[UserWithMember]
     mention_roles: SnowflakeList
-    sticker_items: NotRequired[List[StickerItem]]
+    stickers_items: NotRequired[List[StickerItem]]
     components: NotRequired[List[MessageActionRow]]
 
 
@@ -225,6 +225,7 @@ class Message(PartialMessage):
     hit: NotRequired[bool]
     thread: NotRequired[Thread]
     purchase_notification: NotRequired[PurchaseNotificationResponse]
+    message_snapshots: NotRequired[List[MessageSnapshot]]
 
 
 AllowedMentionType = Literal['roles', 'users', 'everyone']

@@ -578,7 +578,7 @@ class MessageSnapshot(Hashable):
         self.created_at: datetime.datetime = utils.parse_time(data['timestamp'])
         self._edited_timestamp: Optional[datetime.datetime] = utils.parse_time(data['edited_timestamp'])
         self.flags: MessageFlags = MessageFlags._from_value(data.get('flags', 0))
-        self.stickers: List[StickerItem] = [StickerItem(data=d, state=state) for d in data.get('sticker_items', [])]
+        self.stickers: List[StickerItem] = [StickerItem(data=d, state=state) for d in data.get('stickers_items', [])]
 
         self.components: List[ComponentPayload] = []
         for component_data in data.get('components', []):
@@ -622,7 +622,16 @@ class MessageSnapshot(Hashable):
         state = self._state
         return (
             utils.find(
-                lambda m: m.id == self.id,
+                lambda m: (
+                    m.created_at == self.created_at
+                    and m.edited_at == self.edited_at
+                    and m.content == self.content
+                    and m.embeds == self.embeds
+                    and m.components == self.components
+                    and m.stickers == self.stickers
+                    and m.attachments == self.attachments
+                    and m.flags == self.flags
+                ),
                 reversed(state._messages),
             )
             if state._messages
