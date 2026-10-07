@@ -58,6 +58,7 @@ __all__ = (
     'LoginFailure',
     'ConnectionClosed',
     'CaptchaRequired',
+    'FFmpegProcessError',
 )
 
 
@@ -79,6 +80,15 @@ class ClientException(DiscordException):
     __slots__ = ()
 
 
+class FFmpegProcessError(ClientException):
+    """Exception that's raised when an FFmpeg process fails.
+
+    .. versionadded:: 2.2
+    """
+
+    pass
+
+
 class GatewayNotFound(DiscordException):
     """An exception that is raised when the gateway for Discord could not be found"""
 
@@ -95,7 +105,7 @@ def _flatten_error_dict(d: FormErrorsPayload, key: str = '', /) -> Dict[str, str
 
     if is_wrapper(d) and not key:
         items.append(('miscellaneous', ' '.join(x.get('message', '') for x in d['_errors'])))
-        d.pop('_errors')  # type: ignore
+        d.pop('_errors')
 
     for k, v in d.items():
         new_key = key + '.' + k if key else k

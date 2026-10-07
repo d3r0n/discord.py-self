@@ -66,6 +66,7 @@ if TYPE_CHECKING:
     from ..message import Attachment
     from ..abc import Snowflake
     from ..state import ConnectionState
+    from ..components import Component as ComponentObject
     from ..types.webhook import (
         Webhook as WebhookPayload,
     )
@@ -134,11 +135,11 @@ class WebhookAdapter:
             self._locks[bucket] = lock = threading.Lock()
 
         if payload is not None:
-            headers['Content-Type'] = 'application/json; charset=utf-8'
+            headers['Content-Type'] = 'application/json'
             to_send = utils._to_json(payload).encode('utf-8')
 
-        if auth_token is not None:  # TODO: is this possible with users?
-            headers['Authorization'] = f'{auth_token}'
+        if auth_token is not None:
+            headers['Authorization'] = auth_token
 
         if reason is not None:
             headers['X-Audit-Log-Reason'] = urlquote(reason)
@@ -669,7 +670,7 @@ class SyncWebhook(BaseWebhook):
             will not close it. If not given, the ``requests``
             auto session creation functions are used instead.
         user_token: Optional[:class:`str`]
-            The bot authentication token for authenticated requests
+            The authentication token for authenticated requests
             involving the webhook.
 
         Raises
@@ -873,8 +874,8 @@ class SyncWebhook(BaseWebhook):
         silent: bool = MISSING,
         applied_tags: List[ForumTag] = MISSING,
         poll: Poll = MISSING,
-    ) -> SyncWebhookMessage:
-        ...
+        components: Sequence[ComponentObject] = MISSING,
+    ) -> SyncWebhookMessage: ...
 
     @overload
     def send(
@@ -896,8 +897,8 @@ class SyncWebhook(BaseWebhook):
         silent: bool = MISSING,
         applied_tags: List[ForumTag] = MISSING,
         poll: Poll = MISSING,
-    ) -> None:
-        ...
+        components: Sequence[ComponentObject] = MISSING,
+    ) -> None: ...
 
     def send(
         self,
@@ -918,6 +919,7 @@ class SyncWebhook(BaseWebhook):
         silent: bool = False,
         applied_tags: List[ForumTag] = MISSING,
         poll: Poll = MISSING,
+        components: Sequence[ComponentObject] = MISSING,
     ) -> Optional[SyncWebhookMessage]:
         """Sends a message using the webhook.
 
@@ -991,6 +993,11 @@ class SyncWebhook(BaseWebhook):
 
             .. versionadded:: 2.1
 
+        components: List[:class:`Component`]
+            The components to send with this message.
+
+            .. versionadded:: 2.2
+
         Raises
         --------
         HTTPException
@@ -1049,6 +1056,7 @@ class SyncWebhook(BaseWebhook):
             flags=flags,
             applied_tags=applied_tag_ids,
             poll=poll,
+            components=components,
         ) as params:
             adapter: WebhookAdapter = _get_webhook_adapter()
             thread_id: Optional[int] = None
@@ -1132,6 +1140,7 @@ class SyncWebhook(BaseWebhook):
         attachments: Sequence[Union[Attachment, File]] = MISSING,
         allowed_mentions: Optional[AllowedMentions] = None,
         thread: Snowflake = MISSING,
+        components: Sequence[ComponentObject] = MISSING,
     ) -> SyncWebhookMessage:
         """Edits a message owned by this webhook.
 
@@ -1164,6 +1173,11 @@ class SyncWebhook(BaseWebhook):
 
             .. versionadded:: 2.0
 
+        components: List[:class:`Component`]
+            The components to replace the message components with.
+
+            .. versionadded:: 2.2
+
         Raises
         -------
         HTTPException
@@ -1188,6 +1202,7 @@ class SyncWebhook(BaseWebhook):
             embeds=embeds,
             allowed_mentions=allowed_mentions,
             previous_allowed_mentions=previous_mentions,
+            components=components,
         ) as params:
             thread_id: Optional[int] = None
             if thread is not MISSING:

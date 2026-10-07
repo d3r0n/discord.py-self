@@ -33,10 +33,12 @@ from .integration import IntegrationExpireBehavior, PartialIntegration
 from .user import User
 from .scheduled_event import EntityType, EventStatus, GuildScheduledEvent
 from .snowflake import Snowflake
-from .role import Role
+from .role import Role, RoleColours
 from .channel import ChannelType, DefaultReaction, PrivacyLevel, VideoQualityMode, PermissionOverwrite, ForumTag
 from .threads import Thread
+from .command import ApplicationCommand, ApplicationCommandPermissions
 from .automod import AutoModerationTriggerMetadata
+from .onboarding import PromptOption, Prompt
 
 AuditLogEvent = Literal[
     1,
@@ -93,8 +95,16 @@ AuditLogEvent = Literal[
     143,
     144,
     145,
+    146,
     150,
     151,
+    163,
+    164,
+    165,
+    166,
+    167,
+    190,
+    191,
 ]
 
 
@@ -111,6 +121,8 @@ class _AuditLogChange_Str(TypedDict):
         'permissions',
         'tags',
         'unicode_emoji',
+        'emoji_name',
+        'title',
     ]
     new_value: str
     old_value: str
@@ -156,6 +168,10 @@ class _AuditLogChange_Bool(TypedDict):
         'available',
         'archived',
         'locked',
+        'enabled',
+        'single_select',
+        'required',
+        'in_onboarding',
     ]
     new_value: bool
     old_value: bool
@@ -254,8 +270,14 @@ class _AuditLogChange_EntityType(TypedDict):
     old_value: EntityType
 
 
-class _AuditLogChange_AppliedTags(TypedDict):
-    key: Literal['applied_tags']
+class _AuditLogChange_ApplicationCommandPermissions(TypedDict):
+    key: str
+    new_value: ApplicationCommandPermissions
+    old_value: ApplicationCommandPermissions
+
+
+class _AuditLogChange_SnowflakeList(TypedDict):
+    key: Literal['applied_tags', 'default_channel_ids']
     new_value: List[Snowflake]
     old_value: List[Snowflake]
 
@@ -278,6 +300,24 @@ class _AuditLogChange_TriggerMetadata(TypedDict):
     old_value: Optional[AutoModerationTriggerMetadata]
 
 
+class _AuditLogChange_Prompts(TypedDict):
+    key: Literal['prompts']
+    new_value: List[Prompt]
+    old_value: List[Prompt]
+
+
+class _AuditLogChange_Options(TypedDict):
+    key: Literal['options']
+    new_value: List[PromptOption]
+    old_value: List[PromptOption]
+
+
+class _AuditLogChange_RoleColours(TypedDict):
+    key: Literal['colors']
+    new_value: RoleColours
+    old_value: RoleColours
+
+
 AuditLogChange = Union[
     _AuditLogChange_Str,
     _AuditLogChange_AssetHash,
@@ -296,10 +336,14 @@ AuditLogChange = Union[
     _AuditLogChange_PrivacyLevel,
     _AuditLogChange_Status,
     _AuditLogChange_EntityType,
-    _AuditLogChange_AppliedTags,
+    _AuditLogChange_ApplicationCommandPermissions,
+    _AuditLogChange_SnowflakeList,
     _AuditLogChange_AvailableTags,
     _AuditLogChange_DefaultReactionEmoji,
     _AuditLogChange_TriggerMetadata,
+    _AuditLogChange_Prompts,
+    _AuditLogChange_Options,
+    _AuditLogChange_RoleColours,
 ]
 
 
@@ -335,3 +379,4 @@ class AuditLog(TypedDict):
     integrations: List[PartialIntegration]
     threads: List[Thread]
     guild_scheduled_events: List[GuildScheduledEvent]
+    application_commands: NotRequired[List[ApplicationCommand]]

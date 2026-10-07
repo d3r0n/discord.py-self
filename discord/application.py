@@ -30,6 +30,7 @@ from urllib.parse import quote
 
 from . import utils
 from .asset import Asset, AssetMixin
+from .commands import GuildApplicationCommandPermissions, _commands_from_index, _command_factory
 from .entitlements import Entitlement, GiftBatch
 from .enums import (
     ApplicationAssetType,
@@ -57,7 +58,7 @@ from .permissions import Permissions
 from .store import SKU, StoreAsset, StoreListing, SystemRequirements
 from .team import Team
 from .user import User, _UserTag
-from .utils import _bytes_to_base64_data, _parse_localizations
+from .utils import _bytes_to_base64_data
 
 if TYPE_CHECKING:
     from datetime import date
@@ -65,15 +66,16 @@ if TYPE_CHECKING:
     from typing_extensions import Self
 
     from .abc import Snowflake, SnowflakeTime
+    from .commands import MessageCommand, PrimaryEntryPointCommand, SlashCommand, UserCommand
     from .enums import SKUAccessLevel, SKUFeature, SKUGenre, SKUType
     from .file import File
     from .guild import Guild
     from .metadata import MetadataObject
     from .state import ConnectionState
+    from .types.command import CommandApplication as CommandApplicationPayload
     from .store import ContentRating
     from .types.application import (
         EULA as EULAPayload,
-        Achievement as AchievementPayload,
         Application as ApplicationPayload,
         ApplicationActivityStatistics as ApplicationActivityStatisticsPayload,
         ApplicationExecutable as ApplicationExecutablePayload,
@@ -102,7 +104,6 @@ if TYPE_CHECKING:
 __all__ = (
     'Company',
     'EULA',
-    'Achievement',
     'ThirdPartySKU',
     'EmbeddedActivityPlatformConfig',
     'EmbeddedActivityConfig',
@@ -119,6 +120,7 @@ __all__ = (
     'PartialApplication',
     'Application',
     'IntegrationApplication',
+    'CommandApplication',
     'DetectableApplication',
     'UnverifiedApplication',
 )
@@ -217,193 +219,6 @@ class EULA(Hashable):
 
     def __str__(self) -> str:
         return self.name
-
-
-class Achievement(Hashable):
-    """Represents a Discord application achievement.
-
-    .. container:: operations
-
-        .. describe:: x == y
-
-            Checks if two achievements are equal.
-
-        .. describe:: x != y
-
-            Checks if two achievements are not equal.
-
-        .. describe:: hash(x)
-
-            Return the achievement's hash.
-
-        .. describe:: str(x)
-
-            Returns the achievement's name.
-
-    .. versionadded:: 2.0
-
-    Attributes
-    -----------
-    id: :class:`int`
-        The achievement's ID.
-    name: :class:`str`
-        The achievement's name.
-    name_localizations: Dict[:class:`Locale`, :class:`str`]
-        The achievement's name localized to other languages, if available.
-    description: :class:`str`
-        The achievement's description.
-    description_localizations: Dict[:class:`Locale`, :class:`str`]
-        The achievement's description localized to other languages, if available.
-    application_id: :class:`int`
-        The application ID that the achievement belongs to.
-    secure: :class:`bool`
-        Whether the achievement is secure.
-    secret: :class:`bool`
-        Whether the achievement is secret.
-    """
-
-    __slots__ = (
-        'id',
-        'name',
-        'name_localizations',
-        'description',
-        'description_localizations',
-        'application_id',
-        'secure',
-        'secret',
-        '_icon',
-        '_state',
-    )
-
-    if TYPE_CHECKING:
-        name: str
-        name_localizations: dict[Locale, str]
-        description: str
-        description_localizations: dict[Locale, str]
-
-    def __init__(self, *, data: AchievementPayload, state: ConnectionState):
-        self._state = state
-        self._update(data)
-
-    def _update(self, data: AchievementPayload):
-        self.id: int = int(data['id'])
-        self.application_id: int = int(data['application_id'])
-        self.secure: bool = data.get('secure', False)
-        self.secret: bool = data.get('secret', False)
-        self._icon = data.get('icon', data.get('icon_hash'))
-
-        self.name, self.name_localizations = _parse_localizations(data, 'name')
-        self.description, self.description_localizations = _parse_localizations(data, 'description')
-
-    def __repr__(self) -> str:
-        return f'<Achievement id={self.id} name={self.name!r}>'
-
-    def __str__(self) -> str:
-        return self.name
-
-    @property
-    def icon(self) -> Asset:
-        """:class:`Asset`: Returns the achievement's icon."""
-        return Asset._from_achievement_icon(self._state, self.application_id, self.id, self._icon)
-
-    async def edit(
-        self,
-        *,
-        name: str = MISSING,
-        name_localizations: Mapping[Locale, str] = MISSING,
-        description: str = MISSING,
-        description_localizations: Mapping[Locale, str] = MISSING,
-        icon: bytes = MISSING,
-        secure: bool = MISSING,
-        secret: bool = MISSING,
-    ) -> None:
-        """|coro|
-
-        Edits the achievement.
-
-        All parameters are optional.
-
-        Parameters
-        -----------
-        name: :class:`str`
-            The achievement's name.
-        name_localizations: Mapping[:class:`Locale`, :class:`str`]
-            The achievement's name localized to other languages.
-        description: :class:`str`
-            The achievement's description.
-        description_localizations: Mapping[:class:`Locale`, :class:`str`]
-            The achievement's description localized to other languages.
-        icon: :class:`bytes`
-            A :term:`py:bytes-like object` representing the new icon.
-        secure: :class:`bool`
-            Whether the achievement is secure.
-        secret: :class:`bool`
-            Whether the achievement is secret.
-
-        Raises
-        -------
-        Forbidden
-            You do not have permissions to edit the achievement.
-        HTTPException
-            Editing the achievement failed.
-        """
-        payload = {}
-        if secure is not MISSING:
-            payload['secure'] = secure
-        if secret is not MISSING:
-            payload['secret'] = secret
-        if icon is not MISSING:
-            payload['icon'] = utils._bytes_to_base64_data(icon)
-
-        if name is not MISSING or name_localizations is not MISSING:
-            localizations = (name_localizations or {}) if name_localizations is not MISSING else self.name_localizations
-            payload['name'] = {'default': name or self.name, 'localizations': {str(k): v for k, v in localizations.items()}}
-        if description is not MISSING or description_localizations is not MISSING:
-            localizations = (
-                (name_localizations or {}) if description_localizations is not MISSING else self.description_localizations
-            )
-            payload['description'] = {
-                'default': description or self.description,
-                'localizations': {str(k): v for k, v in localizations.items()},
-            }
-
-        data = await self._state.http.edit_achievement(self.application_id, self.id, payload)
-        self._update(data)
-
-    async def update(self, user: Snowflake, percent_complete: int) -> None:
-        """|coro|
-
-        Updates the achievement progress for a specific user.
-
-        Parameters
-        -----------
-        user: :class:`User`
-            The user to update the achievement for.
-        percent_complete: :class:`int`
-            The percent complete for the achievement.
-
-        Raises
-        -------
-        Forbidden
-            You do not have permissions to update the achievement.
-        HTTPException
-            Updating the achievement failed.
-        """
-        await self._state.http.update_user_achievement(self.application_id, self.id, user.id, percent_complete)
-
-    async def delete(self):
-        """|coro|
-
-        Deletes the achievement.
-
-        Raises
-        -------
-        Forbidden
-            You do not have permissions to delete the achievement.
-        HTTPException
-            Deleting the achievement failed.
-        """
-        await self._state.http.delete_achievement(self.application_id, self.id)
 
 
 class ThirdPartySKU:
@@ -519,7 +334,7 @@ class EmbeddedActivityConfig:
 
     Attributes
     -----------
-    application: :class:`PartialApplication`
+    application: Union[:class:`PartialApplication`, :class:`CommandApplication`]
         The application that the configuration is for.
     supported_platforms: List[:class:`EmbeddedActivityPlatform`]
         A list of platforms that the activity supports.
@@ -557,8 +372,13 @@ class EmbeddedActivityConfig:
         '_preview_video_asset_id',
     )
 
-    def __init__(self, *, data: EmbeddedActivityConfigPayload, application: PartialApplication) -> None:
-        self.application: PartialApplication = application
+    def __init__(
+        self,
+        *,
+        data: EmbeddedActivityConfigPayload,
+        application: Union[PartialApplication, CommandApplication],
+    ) -> None:
+        self.application: Union[PartialApplication, CommandApplication] = application
         self._update(data)
 
     def __repr__(self) -> str:
@@ -960,7 +780,7 @@ class ApplicationAsset(AssetMixin, Hashable):
 
     Attributes
     -----------
-    application: Union[:class:`PartialApplication`, :class:`IntegrationApplication`]
+    application: Union[:class:`PartialApplication`, :class:`IntegrationApplication`, :class:`CommandApplication`]
         The application that the asset is for.
     id: :class:`int`
         The asset's ID.
@@ -970,7 +790,12 @@ class ApplicationAsset(AssetMixin, Hashable):
 
     __slots__ = ('_state', 'id', 'name', 'type', 'application')
 
-    def __init__(self, *, data: AssetPayload, application: Union[PartialApplication, IntegrationApplication]) -> None:
+    def __init__(
+        self,
+        *,
+        data: AssetPayload,
+        application: Union[PartialApplication, IntegrationApplication, CommandApplication],
+    ) -> None:
         self._state: ConnectionState = application._state
         self.application = application
         self.id: int = int(data['id'])
@@ -985,7 +810,7 @@ class ApplicationAsset(AssetMixin, Hashable):
 
     @classmethod
     def _from_embedded_activity_config(
-        cls, application: Union[PartialApplication, IntegrationApplication], id: int
+        cls, application: Union[PartialApplication, IntegrationApplication, CommandApplication], id: int
     ) -> ApplicationAsset:
         return cls(data={'id': id, 'name': '', 'type': 1}, application=application)
 
@@ -1022,13 +847,16 @@ class ApplicationActivityStatistics:
     .. versionchanged:: 2.1
 
         ``updated_at`` was renamed to ``last_played_at``.
+        ``application`` was turned into a property.
 
     Attributes
     -----------
     application_id: :class:`int`
-        The ID of the application.
+        The ID of the application the statistics are for.
+    application: Optional[Union[:class:`PartialApplication`, :class:`IntegrationApplication`]]
+        The application the statistics are for, if available.
     user_id: :class:`int`
-        The ID of the user.
+        The ID of the user associated with the statistics.
     duration: :class:`int`
         How long the user has ever played the game in seconds.
         This will be the last session duration for global statistics, and the total duration otherwise.
@@ -1044,18 +872,32 @@ class ApplicationActivityStatistics:
         When the user last played the game.
     """
 
-    __slots__ = ('application_id', 'user_id', 'duration', 'sku_duration', 'first_played_at', 'last_played_at', '_state')
+    __slots__ = (
+        'application_id',
+        'application',
+        '_user',
+        'user_id',
+        'duration',
+        'sku_duration',
+        'first_played_at',
+        'last_played_at',
+        '_state',
+    )
 
     def __init__(
         self,
         *,
         data: Union[ApplicationActivityStatisticsPayload, GlobalActivityStatisticsPayload, UserActivityStatisticsPayload],
         state: ConnectionState,
-        application_id: Optional[int] = None,
+        application: Optional[Union[PartialApplication, IntegrationApplication]] = None,
     ) -> None:
         self._state = state
-        self.application_id = application_id or int(data['application_id'])  # type: ignore
-        self.user_id: int = int(data['user_id']) if 'user_id' in data else state.self_id  # type: ignore
+        self.application_id = application.id if application else int(data['application_id'])  # type: ignore
+        self.application: Optional[Union[PartialApplication, IntegrationApplication]] = application or (
+            PartialApplication(state=state, data=data['application']) if 'application' in data else None
+        )
+        self._user = state.create_user(data['user']) if 'user' in data else None
+        self.user_id: int = int(data['user_id']) if 'user_id' in data else state.self_id
         self.duration: int = data.get('total_duration', data.get('duration', 0))
         self.sku_duration: int = data.get('total_discord_sku_duration', 0)
         self.first_played_at: Optional[datetime] = utils.parse_time(data.get('first_played_at'))
@@ -1069,21 +911,7 @@ class ApplicationActivityStatistics:
     @property
     def user(self) -> Optional[User]:
         """Optional[:class:`User`]: Returns the user associated with the statistics, if available."""
-        return self._state.get_user(self.user_id)
-
-    async def application(self) -> PartialApplication:
-        """|coro|
-
-        Returns the application associated with the statistics.
-
-        Raises
-        ------
-        HTTPException
-            Fetching the application failed.
-        """
-        state = self._state
-        data = await state.http.get_partial_application(self.application_id)
-        return PartialApplication(state=state, data=data)
+        return self._user or self._state.get_user(self.user_id)
 
 
 class ManifestLabel(Hashable):
@@ -1624,7 +1452,7 @@ class ApplicationBranch(Hashable):
     async def create_build(
         self,
         *,
-        built_with: str = "DISPATCH",
+        built_with: str = 'DISPATCH',
         manifests: Sequence[MetadataObject],
         source_build: Optional[Snowflake] = None,
     ) -> Tuple[ApplicationBuild, List[Manifest]]:
@@ -1824,6 +1652,172 @@ class _BaseApplication(Hashable):
         state = self._state
         data = await state.http.get_app_entitlement_ticket(self.id)
         return data['ticket']
+
+    async def proxy_external_assets(self, *urls: str) -> List[str]:
+        r"""|coro|
+
+        Proxies up to 2 external asset URLs through Discord's media proxy,
+        for use in rich presence.
+
+        Parameters
+        -----------
+        \*urls: :class:`str`
+            The external asset URLs to proxy.
+
+        Raises
+        -------
+        HTTPException
+            Proxying the assets failed.
+
+        Returns
+        --------
+        List[:class:`str`]
+            The proxied asset URLs.
+        """
+        if not urls:
+            return []
+
+        data = await self._state.http.create_app_external_assets(self.id, urls)
+        prefix = 'https://media.discordapp.net/'
+        return [prefix + asset['external_asset_path'] for asset in data]
+
+
+class CommandApplication(Hashable):
+    """Represents an application received in a command index.
+
+    .. container:: operations
+
+        .. describe:: x == y
+
+            Checks if two applications are equal.
+
+        .. describe:: x != y
+
+            Checks if two applications are not equal.
+
+        .. describe:: hash(x)
+
+            Return the application's hash.
+
+        .. describe:: str(x)
+
+            Returns the application's name.
+
+    .. versionadded:: 2.2
+
+    Attributes
+    ----------
+    id: :class:`int`
+        The application ID.
+    name: :class:`str`
+        The application name.
+    description: :class:`str`
+        The application description.
+    bot: Optional[:class:`User`]
+        The bot attached to the application, if included.
+    bot_id: Optional[:class:`int`]
+        The ID of the bot attached to the application, if any.
+    permissions: Optional[:class:`GuildApplicationCommandPermissions`]
+        The application-wide command permission overwrites from a guild command
+        index, if available. User overwrite entries are only included for the
+        current user.
+    embedded_activity_config: Optional[:class:`EmbeddedActivityConfig`]
+        The partial embedded activity configuration for the application, if included.
+    """
+
+    # Regrettably, this guy is so partial I can't make it import from BaseApplication :(
+
+    __slots__ = (
+        '_state',
+        'id',
+        'name',
+        'description',
+        'bot',
+        'bot_id',
+        'permissions',
+        'embedded_activity_config',
+        '_icon',
+        '_flags',
+    )
+
+    def __init__(
+        self,
+        *,
+        state: ConnectionState,
+        data: CommandApplicationPayload,
+        guild: Optional[Guild] = None,
+    ) -> None:
+        self._state: ConnectionState = state
+        self._update(data, guild=guild)
+
+    def __repr__(self) -> str:
+        return f'<CommandApplication id={self.id} name={self.name!r}>'
+
+    def __str__(self) -> str:
+        return self.name
+
+    def _update(self, data: CommandApplicationPayload, *, guild: Optional[Guild] = None) -> None:
+        self.id: int = int(data['id'])
+        self.name: str = data['name']
+        self.description: str = data.get('description') or ''
+        self._icon: Optional[str] = data.get('icon')
+        self._flags: int = int(data.get('flags', 0))  # flags are given as a string here
+
+        self.bot: Optional[User] = self._state.create_user(data['bot']) if 'bot' in data else None
+        self.bot_id: Optional[int] = utils._get_as_snowflake(data, 'bot_id')
+
+        config = data.get('embedded_activity_config')
+        self.embedded_activity_config: Optional[EmbeddedActivityConfig] = (
+            EmbeddedActivityConfig(data=config, application=self) if config else None
+        )
+
+        self.permissions: Optional[GuildApplicationCommandPermissions]
+        index_permissions = data.get('permissions')
+        if guild is not None:
+            self.permissions = GuildApplicationCommandPermissions._from_index(
+                state=self._state,
+                guild=guild,
+                application_id=self.id,
+                id=self.id,
+                data=index_permissions,
+            )
+        else:
+            self.permissions = None
+
+    @property
+    def created_at(self) -> datetime:
+        """:class:`datetime.datetime`: Returns the application's creation time in UTC."""
+        return utils.snowflake_time(self.id)
+
+    @property
+    def icon(self) -> Optional[Asset]:
+        """Optional[:class:`Asset`]: Retrieves the application's icon asset, if any."""
+        if self._icon is None:
+            return None
+        return Asset._from_icon(self._state, self.id, self._icon, path='app')
+
+    @property
+    def flags(self) -> ApplicationFlags:
+        """:class:`ApplicationFlags`: The application's flags."""
+        return ApplicationFlags._from_value(self._flags)
+
+    async def assets(self) -> List[ApplicationAsset]:
+        """|coro|
+
+        Retrieves the assets of this application.
+
+        Raises
+        ------
+        HTTPException
+            Retrieving the assets failed.
+
+        Returns
+        -------
+        List[:class:`ApplicationAsset`]
+            The application's assets.
+        """
+        data = await self._state.http.get_app_assets(self.id)
+        return [ApplicationAsset(data=d, application=self) for d in data]
 
 
 class DetectableApplication(_BaseApplication):
@@ -2094,7 +2088,7 @@ class PartialApplication(_BaseApplication):
         self.terms_of_service_url: Optional[str] = data.get('terms_of_service_url')
         self.privacy_policy_url: Optional[str] = data.get('privacy_policy_url')
         self.deeplink_uri: Optional[str] = data.get('deeplink_uri')
-        self._flags: int = data.get('flags', 0)
+        self._flags: int = int(data.get('new_flags', data.get('flags', 0)))
         self.type: Optional[ApplicationType] = try_enum(ApplicationType, data['type']) if data.get('type') else None
         self.hook: bool = data.get('hook', False)
         self.max_participants: Optional[int] = data.get('max_participants')
@@ -2314,35 +2308,6 @@ class PartialApplication(_BaseApplication):
         data = await state.http.get_app_store_listing(self.id, country_code=state.country_code or 'US', localize=localize)
         return StoreListing(state=state, data=data, application=self)
 
-    async def achievements(self, completed: bool = True) -> List[Achievement]:
-        """|coro|
-
-        Retrieves the achievements for this application.
-
-        Parameters
-        -----------
-        completed: :class:`bool`
-            Whether to only include achievements the user has completed or can access.
-            This means secret achievements that are not yet unlocked will not be included.
-
-            If ``False``, then you require access to the application.
-
-        Raises
-        -------
-        Forbidden
-            You do not have permissions to fetch achievements.
-        HTTPException
-            Fetching the achievements failed.
-
-        Returns
-        --------
-        List[:class:`Achievement`]
-            The achievements retrieved.
-        """
-        state = self._state
-        data = (await state.http.get_my_achievements(self.id)) if completed else (await state.http.get_achievements(self.id))
-        return [Achievement(data=achievement, state=state) for achievement in data]
-
     async def entitlements(self, *, exclude_consumed: bool = True) -> List[Entitlement]:
         """|coro|
 
@@ -2407,7 +2372,51 @@ class PartialApplication(_BaseApplication):
         state = self._state
         app_id = self.id
         data = await state.http.get_app_activity_statistics(app_id)
-        return [ApplicationActivityStatistics(data=activity, state=state, application_id=app_id) for activity in data]
+        return [ApplicationActivityStatistics(data=activity, state=state, application=self) for activity in data]
+
+    async def application_commands(
+        self, *, from_index: bool = True
+    ) -> List[Union[SlashCommand, UserCommand, MessageCommand, PrimaryEntryPointCommand]]:
+        """|coro|
+
+        Returns a list of all application commands available for this application.
+
+        .. versionadded:: 2.2
+
+        .. note::
+
+            This endpoint is heavily rate limited. The application command index should be cached
+            and only refetched if necessary.
+
+        Parameters
+        -----------
+        from_index: :class:`bool`
+            Whether to fetch the commands from the command index. Otherwise,
+            uses the application commands API, which requires that you have
+            owner access to the application, but includes all commands,
+            while the command index only includes usable ones.
+
+        Raises
+        -------
+        HTTPException
+            Fetching the commands failed.
+
+        Returns
+        --------
+        List[Union[:class:`SlashCommand`, :class:`UserCommand`, :class:`MessageCommand`, :class:`PrimaryEntryPointCommand`]]
+            The list of application commands that are available for this application.
+        """
+        state = self._state
+        if from_index:
+            data = await state.http.application_command_index(self.id)
+            return _commands_from_index(state=state, data=data)
+
+        data = await state.http.get_application_commands(self.id)
+        result = []
+        for command in data:
+            _, cls = _command_factory(command['type'])
+            result.append(cls(state=state, data=command, application=self))
+        return result
 
 
 class Application(PartialApplication):
@@ -2980,12 +2989,10 @@ class Application(PartialApplication):
         message_content_privacy_policy_location: str = ...,
         message_content_privacy_policy_example: str = ...,
         message_content_contact_deletion: str = ...,
-    ) -> None:
-        ...
+    ) -> None: ...
 
     @overload
-    async def request_intents(self, intents: ApplicationFlags, description: str) -> None:
-        ...
+    async def request_intents(self, intents: ApplicationFlags, description: str) -> None: ...
 
     async def request_intents(self, intents: ApplicationFlags, description: str, **kwargs: Any) -> None:
         """|coro|
@@ -3092,16 +3099,13 @@ class Application(PartialApplication):
         return [ApplicationTester(self, state, user) for user in data]
 
     @overload
-    async def whitelist(self, user: _UserTag, /) -> ApplicationTester:
-        ...
+    async def whitelist(self, user: _UserTag, /) -> ApplicationTester: ...
 
     @overload
-    async def whitelist(self, user: str, /) -> ApplicationTester:
-        ...
+    async def whitelist(self, user: str, /) -> ApplicationTester: ...
 
     @overload
-    async def whitelist(self, username: str, discriminator: str, /) -> ApplicationTester:
-        ...
+    async def whitelist(self, username: str, discriminator: str, /) -> ApplicationTester: ...
 
     async def whitelist(self, *args: Union[_UserTag, str]) -> ApplicationTester:
         """|coro|
@@ -3435,7 +3439,7 @@ class Application(PartialApplication):
         if dependent_sku is not None:
             payload['dependent_sku_id'] = dependent_sku.id
         if access_level is not None:
-            payload['access_level'] = int(access_level)
+            payload['access_type'] = int(access_level)
         if locales:
             payload['locales'] = [str(l) for l in locales]
         if features:
@@ -3461,90 +3465,6 @@ class Application(PartialApplication):
         data = await state.http.create_sku(payload)
         return SKU(data=data, state=state, application=self)
 
-    async def fetch_achievement(self, achievement_id: int) -> Achievement:
-        """|coro|
-
-        Retrieves an achievement for this application.
-
-        Parameters
-        -----------
-        achievement_id: :class:`int`
-            The ID of the achievement to fetch.
-
-        Raises
-        ------
-        Forbidden
-            You do not have permissions to fetch the achievement.
-        HTTPException
-            Fetching the achievement failed.
-
-        Returns
-        -------
-        :class:`Achievement`
-            The achievement retrieved.
-        """
-        data = await self._state.http.get_achievement(self.id, achievement_id)
-        return Achievement(data=data, state=self._state)
-
-    async def create_achievement(
-        self,
-        *,
-        name: str,
-        name_localizations: Optional[Mapping[Locale, str]] = None,
-        description: str,
-        description_localizations: Optional[Mapping[Locale, str]] = None,
-        icon: bytes,
-        secure: bool = False,
-        secret: bool = False,
-    ) -> Achievement:
-        """|coro|
-
-        Creates an achievement for this application.
-
-        Parameters
-        -----------
-        name: :class:`str`
-            The name of the achievement.
-        name_localizations: Mapping[:class:`Locale`, :class:`str`]
-            The localized names of the achievement.
-        description: :class:`str`
-            The description of the achievement.
-        description_localizations: Mapping[:class:`Locale`, :class:`str`]
-            The localized descriptions of the achievement.
-        icon: :class:`bytes`
-            The icon of the achievement.
-        secure: :class:`bool`
-            Whether the achievement is secure.
-        secret: :class:`bool`
-            Whether the achievement is secret.
-
-        Raises
-        -------
-        Forbidden
-            You do not have permissions to create achievements.
-        HTTPException
-            Creating the achievement failed.
-
-        Returns
-        --------
-        :class:`Achievement`
-            The created achievement.
-        """
-        state = self._state
-        data = await state.http.create_achievement(
-            self.id,
-            name=name,
-            name_localizations={str(k): v for k, v in name_localizations.items()} if name_localizations else None,
-            description=description,
-            description_localizations={str(k): v for k, v in description_localizations.items()}
-            if description_localizations
-            else None,
-            icon=_bytes_to_base64_data(icon),
-            secure=secure,
-            secret=secret,
-        )
-        return Achievement(state=state, data=data)
-
     async def entitlements(
         self,
         *,
@@ -3555,8 +3475,7 @@ class Application(PartialApplication):
         before: Optional[SnowflakeTime] = None,
         after: Optional[SnowflakeTime] = None,
         oldest_first: bool = MISSING,
-        with_payments: bool = False,
-        exclude_ended: bool = False,
+        include_ended: bool = False,
     ) -> AsyncIterator[Entitlement]:
         """Returns an :term:`asynchronous iterator` that enables receiving this application's entitlements.
 
@@ -3600,10 +3519,16 @@ class Application(PartialApplication):
         oldest_first: :class:`bool`
             If set to ``True``, return entitlements in oldest->newest order. Defaults to ``True`` if
             ``after`` is specified, otherwise ``False``.
-        with_payments: :class:`bool`
-            Whether to include partial payment info in the response.
-        exclude_ended: :class:`bool`
+        include_ended: :class:`bool`
             Whether to exclude entitlements that have ended.
+
+            .. versionchanged:: 2.1
+
+                Renamed from ``exclude_ended`` to ``include_ended``.
+        include_deleted: :class:`bool`
+            Whether to include deleted entitlements in the results.
+
+            .. versionadded:: 2.1
 
         Raises
         ------
@@ -3627,8 +3552,8 @@ class Application(PartialApplication):
                 user_id=user.id if user else None,
                 guild_id=guild.id if guild else None,
                 sku_ids=[sku.id for sku in skus] if skus else None,
-                with_payments=with_payments,
-                exclude_ended=exclude_ended,
+                exclude_ended=not include_ended,
+                exclude_deleted=not include_ended,
             )
 
             if data:
@@ -3648,8 +3573,8 @@ class Application(PartialApplication):
                 user_id=user.id if user else None,
                 guild_id=guild.id if guild else None,
                 sku_ids=[sku.id for sku in skus] if skus else None,
-                with_payments=with_payments,
-                exclude_ended=exclude_ended,
+                exclude_ended=not include_ended,
+                exclude_deleted=not include_ended,
             )
             if data:
                 if limit is not None:
@@ -3866,7 +3791,7 @@ class Application(PartialApplication):
         state = self._state
         app_id = self.id
         data = await state.http.get_app_manifest_labels(app_id)
-        return [ManifestLabel(data=label, application_id=app_id) for label in data]
+        return [ManifestLabel(data=label, application_id=app_id) for label in data]  # type: ignore # TODO: this is terrible code
 
     async def fetch_discoverability(self) -> Tuple[ApplicationDiscoverabilityState, ApplicationDiscoveryFlags]:
         """|coro|
@@ -4309,6 +4234,50 @@ class IntegrationApplication(Hashable):
         data = await state.http.get_app_entitlement_ticket(self.id)
         return data['ticket']
 
+    async def application_commands(
+        self, *, from_index: bool = True
+    ) -> List[Union[SlashCommand, UserCommand, MessageCommand, PrimaryEntryPointCommand]]:
+        """|coro|
+
+        Returns a list of all application commands available for this application.
+
+        .. versionadded:: 2.2
+
+        .. note::
+
+            This endpoint is heavily rate limited. The application command index should be cached
+            and only refetched if necessary.
+
+        Parameters
+        -----------
+        from_index: :class:`bool`
+            Whether to fetch the commands from the command index. Otherwise,
+            uses the application commands API, which requires that you have
+            owner access to the application, but includes all commands,
+            while the command index only includes usable ones.
+
+        Raises
+        -------
+        HTTPException
+            Fetching the commands failed.
+
+        Returns
+        --------
+        List[Union[:class:`SlashCommand`, :class:`UserCommand`, :class:`MessageCommand`, :class:`PrimaryEntryPointCommand`]]
+            The list of application commands that are available for this application.
+        """
+        state = self._state
+        if from_index:
+            data = await state.http.application_command_index(self.id)
+            return _commands_from_index(state=state, data=data)
+
+        data = await state.http.get_application_commands(self.id)
+        result = []
+        for command in data:
+            _, cls = _command_factory(command['type'])
+            result.append(cls(state=state, data=command, application=self))
+        return result
+
     async def activity_statistics(self) -> List[ApplicationActivityStatistics]:
         """|coro|
 
@@ -4327,7 +4296,7 @@ class IntegrationApplication(Hashable):
         state = self._state
         app_id = self.id
         data = await state.http.get_app_activity_statistics(app_id)
-        return [ApplicationActivityStatistics(data=activity, state=state, application_id=app_id) for activity in data]
+        return [ApplicationActivityStatistics(data=activity, state=state, application=self) for activity in data]
 
 
 class UnverifiedApplication:

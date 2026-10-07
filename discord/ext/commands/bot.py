@@ -25,7 +25,6 @@ DEALINGS IN THE SOFTWARE.
 from __future__ import annotations
 
 
-import asyncio
 import collections
 import collections.abc
 import inspect
@@ -50,7 +49,7 @@ from typing import (
 )
 
 import discord
-from discord.utils import MISSING, _is_submodule
+from discord.utils import MISSING, _iscoroutinefunction, _is_submodule
 
 from .core import GroupMixin
 from .view import StringView
@@ -60,7 +59,7 @@ from .help import HelpCommand, DefaultHelpCommand
 from .cog import Cog
 
 if TYPE_CHECKING:
-    from typing_extensions import Self
+    from typing_extensions import Self, Unpack
 
     import importlib.machinery
 
@@ -74,10 +73,20 @@ if TYPE_CHECKING:
         ContextT,
         MaybeAwaitableFunc,
     )
+    from discord.client import _ClientOptions
 
     _Prefix = Union[Iterable[str], str]
     _PrefixCallable = MaybeAwaitableFunc[[BotT, Message], _Prefix]
     PrefixType = Union[_Prefix, _PrefixCallable[BotT]]
+
+    class _BotOptions(_ClientOptions, total=False):
+        owner_id: Optional[int]
+        owner_ids: Optional[Collection[int]]
+        strip_after_prefix: bool
+        case_insensitive: bool
+        self_bot: bool
+        user_bot: bool
+
 
 __all__ = (
     'when_mentioned',
@@ -156,10 +165,10 @@ class BotBase(GroupMixin[None]):
         command_prefix: PrefixType[BotT],
         help_command: Optional[HelpCommand] = _default,
         description: Optional[str] = None,
-        **options: Any,
+        **options: Unpack[_BotOptions],
     ) -> None:
         super().__init__(**options)
-        self.command_prefix: PrefixType[BotT] = command_prefix
+        self.command_prefix: PrefixType[BotT] = command_prefix  # type: ignore
         self.extra_events: Dict[str, List[CoroFunc]] = {}
         self.__cogs: Dict[str, Cog] = {}
         self.__extensions: Dict[str, types.ModuleType] = {}
@@ -381,7 +390,7 @@ class BotBase(GroupMixin[None]):
         if len(data) == 0:
             return True
 
-        return await discord.utils.async_all(f(ctx) for f in data)
+        return await discord.utils.async_all(f(ctx) for f in data)  # type: ignore
 
     async def is_owner(self, user: User, /) -> bool:
         """|coro|
@@ -412,7 +421,7 @@ class BotBase(GroupMixin[None]):
         elif self.owner_ids:
             return user.id in self.owner_ids
         else:
-            raise AttributeError('Owners aren\'t set.')
+            raise AttributeError("Owners aren't set.")
 
     def before_invoke(self, coro: CFT, /) -> CFT:
         """A decorator that registers a coroutine as a pre-invoke hook.
@@ -444,7 +453,7 @@ class BotBase(GroupMixin[None]):
         TypeError
             The coroutine passed is not actually a coroutine.
         """
-        if not asyncio.iscoroutinefunction(coro):
+        if not _iscoroutinefunction(coro):
             raise TypeError('The pre-invoke hook must be a coroutine.')
 
         self._before_invoke = coro
@@ -481,7 +490,7 @@ class BotBase(GroupMixin[None]):
         TypeError
             The coroutine passed is not actually a coroutine.
         """
-        if not asyncio.iscoroutinefunction(coro):
+        if not _iscoroutinefunction(coro):
             raise TypeError('The post-invoke hook must be a coroutine.')
 
         self._after_invoke = coro
@@ -517,7 +526,7 @@ class BotBase(GroupMixin[None]):
         """
         name = func.__name__ if name is MISSING else name
 
-        if not asyncio.iscoroutinefunction(func):
+        if not _iscoroutinefunction(func):
             raise TypeError('Listeners must be coroutines')
 
         if name in self.extra_events:
@@ -1021,7 +1030,7 @@ class BotBase(GroupMixin[None]):
 
         if callable(prefix):
             # self will be a Bot or AutoShardedBot
-            ret = await discord.utils.maybe_coroutine(prefix, self, message)  # type: ignore
+            ret = await discord.utils.maybe_coroutine(prefix, self, message)
 
         if not isinstance(ret, str):
             try:
@@ -1033,8 +1042,8 @@ class BotBase(GroupMixin[None]):
                     raise
 
                 raise TypeError(
-                    "command_prefix must be plain string, iterable of strings, or callable "
-                    f"returning either of these, not {ret.__class__.__name__}"
+                    'command_prefix must be plain string, iterable of strings, or callable '
+                    f'returning either of these, not {ret.__class__.__name__}'
                 )
 
         return ret
@@ -1054,8 +1063,7 @@ class BotBase(GroupMixin[None]):
         /,
         *,
         cls: Type[ContextT] = ...,
-    ) -> ContextT:
-        ...
+    ) -> ContextT: ...
 
     async def get_context(
         self,
@@ -1123,15 +1131,15 @@ class BotBase(GroupMixin[None]):
             except TypeError:
                 if not isinstance(prefix, list):
                     raise TypeError(
-                        "get_prefix must return either a string or a list of string, " f"not {prefix.__class__.__name__}"
+                        f'get_prefix must return either a string or a list of string, not {prefix.__class__.__name__}'
                     )
 
                 # It's possible a bad command_prefix got us here.
                 for value in prefix:
                     if not isinstance(value, str):
                         raise TypeError(
-                            "Iterable command_prefix or list returned from get_prefix must "
-                            f"contain only strings, not {value.__class__.__name__}"
+                            'Iterable command_prefix or list returned from get_prefix must '
+                            f'contain only strings, not {value.__class__.__name__}'
                         )
 
                 # Getting here shouldn't happen
@@ -1290,4 +1298,13 @@ class Bot(BotBase, discord.Client):
         .. versionadded:: 1.7
     """
 
-    pass
+    if TYPE_CHECKING:
+
+        def __init__(
+            self,
+            command_prefix: PrefixType[BotT],
+            *,
+            help_command: Optional[HelpCommand] = _default,
+            description: Optional[str] = None,
+            **kwargs: Unpack[_BotOptions],
+        ) -> None: ...

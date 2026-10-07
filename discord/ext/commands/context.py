@@ -21,14 +21,13 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
 FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 """
+
 from __future__ import annotations
 
 import re
 from typing import (
     TYPE_CHECKING,
     Any,
-    AsyncIterator,
-    Collection,
     Dict,
     Generic,
     List,
@@ -50,7 +49,6 @@ if TYPE_CHECKING:
     from typing_extensions import ParamSpec, TypeGuard
 
     from discord.abc import MessageableChannel
-    from discord.commands import MessageCommand
     from discord.file import _FileBase
     from discord.guild import Guild
     from discord.member import Member
@@ -75,7 +73,7 @@ __all__ = (
 
 
 T = TypeVar('T')
-CogT = TypeVar('CogT', bound="Cog")
+CogT = TypeVar('CogT', bound='Cog')
 
 if TYPE_CHECKING:
     P = ParamSpec('P')
@@ -303,8 +301,8 @@ class Context(discord.abc.Messageable, Generic[BotT]):
         # consider this to be an *incredibly* strange use case. I'd rather go
         # for this common use case rather than waste performance for the
         # odd one.
-        pattern = re.compile(r"<@!?%s>" % user.id)
-        return pattern.sub("@%s" % user.display_name.replace('\\', r'\\'), self.prefix)
+        pattern = re.compile(r'<@!?%s>' % user.id)
+        return pattern.sub('@%s' % user.display_name.replace('\\', r'\\'), self.prefix)
 
     @property
     def cog(self) -> Optional[Cog]:
@@ -454,8 +452,7 @@ class Context(discord.abc.Messageable, Generic[BotT]):
         ephemeral: bool = ...,
         silent: bool = ...,
         poll: Poll = ...,
-    ) -> Message:
-        ...
+    ) -> Message: ...
 
     @overload
     async def reply(
@@ -474,8 +471,7 @@ class Context(discord.abc.Messageable, Generic[BotT]):
         ephemeral: bool = ...,
         silent: bool = ...,
         poll: Poll = ...,
-    ) -> Message:
-        ...
+    ) -> Message: ...
 
     @overload
     async def reply(
@@ -494,8 +490,7 @@ class Context(discord.abc.Messageable, Generic[BotT]):
         ephemeral: bool = ...,
         silent: bool = ...,
         poll: Poll = ...,
-    ) -> Message:
-        ...
+    ) -> Message: ...
 
     @overload
     async def reply(
@@ -514,24 +509,8 @@ class Context(discord.abc.Messageable, Generic[BotT]):
         ephemeral: bool = ...,
         silent: bool = ...,
         poll: Poll = ...,
-    ) -> Message:
-        ...
+    ) -> Message: ...
 
     @discord.utils.copy_doc(Message.reply)
     async def reply(self, content: Optional[str] = None, **kwargs: Any) -> Message:
         return await self.message.reply(content, **kwargs)
-
-    @discord.utils.deprecated("Context.application_commands")
-    @discord.utils.copy_doc(Message.message_commands)
-    def message_commands(
-        self,
-        query: Optional[str] = None,
-        *,
-        limit: Optional[int] = None,
-        command_ids: Optional[Collection[int]] = None,
-        application: Optional[discord.abc.Snowflake] = None,
-        with_applications: bool = True,
-    ) -> AsyncIterator[MessageCommand]:
-        return self.message.message_commands(
-            query, limit=limit, command_ids=command_ids, with_applications=with_applications, application=application
-        )

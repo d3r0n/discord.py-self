@@ -26,12 +26,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Dict, Final, Iterator, List, Optional, Sequence, Tuple, Union
 
-from .enums import HubType, try_enum
+from .enums import ApexExperimentUnitType, HubType, try_enum
+from .flags import ApexExperimentFlags
 from .metadata import Metadata
 from .utils import SequenceProxy, SnowflakeList, cached_slot_property, murmurhash32, utcnow
 
 if TYPE_CHECKING:
     from .abc import Snowflake
+    from .client import Client
     from .guild import Guild
     from .state import ConnectionState
     from .types.experiment import (
@@ -41,6 +43,8 @@ if TYPE_CHECKING:
         Population as PopulationPayload,
         Rollout as RolloutPayload,
         UserExperiment as AssignmentPayload,
+        ApexExperimentResponse as ApexExperimentResponsePayload,
+        ApexExperimentAssignment as ApexExperimentAssignmentPayload,
     )
 
 __all__ = (
@@ -51,6 +55,8 @@ __all__ = (
     'HoldoutExperiment',
     'GuildExperiment',
     'UserExperiment',
+    'ApexExperimentAssignment',
+    'ApexExperiment',
 )
 
 
@@ -907,3 +913,245 @@ class UserExperiment:
             result = murmurhash32(f'{self.name}:{self._state.self_id}', signed=False) % 10000
             self._result = result
             return result
+
+
+class ApexExperimentAssignment:
+    """Represents a unit's assignment in an Apex experiment.
+
+    .. container:: operations
+
+        .. describe:: x == y
+
+            Checks if two experiment assignments are equal.
+
+        .. describe:: x != y
+
+            Checks if two experiment assignments are not equal.
+
+        .. describe:: hash(x)
+
+            Returns the experiment assignment's hash.
+
+    .. versionadded:: 2.2
+
+    Attributes
+    -----------
+    experiment: :class:`ApexExperiment`
+        The experiment this assignment belongs to.
+    unit_id: :class:`int`
+        The ID of the unit (i.e. user, guild, etc.) this assignment applies to.
+    evaluation_id: :class:`str`
+        The evaluation ID of the assignment, used for analytics.
+    variant_id: :class:`int`
+        The assigned variant ID (bucket) for the unit.
+    """
+
+    __slots__ = ('experiment', 'unit_id', 'evaluation_id', 'variant_id', '_flags')
+
+    def __init__(
+        self,
+        experiment: ApexExperiment,
+        unit_id: int,
+        evaluation_id: str,
+        data: ApexExperimentAssignmentPayload,
+    ):
+        self.experiment: ApexExperiment = experiment
+        self.unit_id: int = unit_id
+        self.evaluation_id: str = evaluation_id
+        self.variant_id: int = data[1]
+        self._flags: int = data[2] or 0
+
+    def __repr__(self) -> str:
+        return (
+            f'<ApexExperimentAssignment experiment={self.experiment!r} unit_id={self.unit_id} variant_id={self.variant_id}>'
+        )
+
+    def __hash__(self) -> int:
+        return hash((self.experiment, self.unit_id))
+
+    def __eq__(self, other: object, /) -> bool:
+        if isinstance(other, ApexExperimentAssignment):
+            return self.experiment == other.experiment and self.unit_id == other.unit_id
+        return NotImplemented
+
+    @property
+    def flags(self) -> ApexExperimentFlags:
+        """:class:`ApexExperimentFlags`: The flags for the assignment."""
+        return ApexExperimentFlags._from_value(self._flags)
+
+
+class ApexExperiment:
+    """Represents an Apex experiment.
+
+    Apex experiments are a new experiment system that completely replaces
+    the previous guild and user experiment systems.
+
+    They use "variants" instead of "buckets" or "treatments" and send much more
+    limited data about the experiment, with no public rollout information.
+
+    They also introduce the concept of per-installation experiments, which are experiments
+    that are assigned to a unique client installation ID instead of a user or guild.
+
+    .. container:: operations
+
+        .. describe:: x == y
+
+            Checks if two experiments are equal.
+
+        .. describe:: x != y
+
+            Checks if two experiments are not equal.
+
+        .. describe:: hash(x)
+
+            Returns the experiment's hash.
+
+    .. versionadded:: 2.2
+
+    Attributes
+    -----------
+    unit_type: :class:`ApexExperimentUnitType`
+        The type of unit (i.e. user, guild, installation, etc.) this experiment applies to.
+    hash: :class:`int`
+        The 32-bit unsigned Murmur3 hash of the experiment's name.
+    revision: :class:`int`
+        The current revision of the experiment rollout.
+    tracked_variant_id: Optional[:class:`int`]
+        The variant ID that is currently being tracked.
+    """
+
+    __slots__ = ('_state', '_name', 'unit_type', 'hash', 'revision', 'tracked_variant_id', '_flags', '_assignments')
+
+    def __init__(self, *, state: ConnectionState, data: ApexExperimentAssignmentPayload, unit_type: ApexExperimentUnitType):
+        self._state = state
+        self._name: Optional[str] = None
+        self.unit_type: ApexExperimentUnitType = unit_type
+        self.hash: int = data[0]
+        self.revision: int = data[3]
+        self.tracked_variant_id: Optional[int] = data[4] if len(data) > 4 else None
+        self._flags: int = data[2] or 0  # Some of these are prolly global, but I'm not going to expose for now
+        self._assignments: Dict[int, ApexExperimentAssignment] = {}
+
+    @classmethod
+    def parse(
+        cls, state: ConnectionState, data: Optional[ApexExperimentResponsePayload], /
+    ) -> Tuple[Dict[int, ApexExperiment], Dict[int, List[ApexExperimentAssignment]], Optional[str]]:
+        # Apex experiments are given as a map of unit type -> map of unit ID -> assignments
+        # This is a terrible format, so we're flattening each experiment mention within the assignments to one
+        # ApexExperiment that holds a list of all assignments to it
+
+        if not data:
+            return {}, {}, None
+
+        experiments: Dict[int, ApexExperiment] = {}
+        assignments: Dict[int, List[ApexExperimentAssignment]] = {}
+
+        # Sort unit types in descending order (e.g., Guild -> Installation -> User)
+        # This guarantees Guild experiments are registered with the correct primary unit_type,
+        # preventing them from being erroneously marked as User experiments due to underlying
+        # UseAsEligibility or IsOverride assignment entries
+        sorted_assignments = sorted(data.get('assignments', {}).items(), key=lambda x: int(x[0]), reverse=True)
+
+        for _unit_type, unit_map in sorted_assignments:
+            unit_type = try_enum(ApexExperimentUnitType, int(_unit_type))
+            for _unit_id, assignment_data in unit_map.items():
+                unit_id = int(_unit_id)
+                evaluation_id = assignment_data.get('evaluation_id')
+                for assignment_item in assignment_data.get('assignments', []):
+                    experiment_hash = assignment_item[0]
+                    try:
+                        experiment = experiments[experiment_hash]
+                    except KeyError:
+                        experiment = experiments[experiment_hash] = ApexExperiment(
+                            state=state, data=assignment_item, unit_type=unit_type
+                        )
+
+                    # evaluation_id is treated as nullable by the client, but I don't think it is
+                    assignment = ApexExperimentAssignment(experiment, unit_id, evaluation_id or '', assignment_item)
+                    experiment._assignments[unit_id] = assignment
+                    try:
+                        assignments[unit_id].append(assignment)
+                    except KeyError:
+                        assignments[unit_id] = [assignment]
+
+        return experiments, assignments, data.get('installation')
+
+    def __hash__(self) -> int:
+        return self.hash
+
+    def __eq__(self, other: object, /) -> bool:
+        if isinstance(other, ApexExperiment):
+            return self.hash == other.hash
+        return NotImplemented
+
+    def __repr__(self) -> str:
+        return f'<ApexExperiment unit_type={self.unit_type!r} hash={self.hash}{f" name={self._name!r}" if self._name else ""} revision={self.revision}>'
+
+    @property
+    def name(self) -> Optional[str]:
+        """Optional[:class:`str`]: The unique name of the experiment.
+
+        This data is not available via the API, and must be set manually for using related functions.
+        """
+        return self._name
+
+    @name.setter
+    def name(self, value: Optional[str], /) -> None:
+        if not value:
+            self._name = None
+        elif murmurhash32(value, signed=False) != self.hash:
+            raise ValueError('The name provided does not match the experiment hash')
+        else:
+            self._name = value
+
+    @property
+    def assignments(self) -> Sequence[ApexExperimentAssignment]:
+        """Sequence[:class:`ApexExperimentAssignment`]: The assignments for the experiment."""
+        return SequenceProxy(self._assignments.values())
+
+    def assignment_for(self, unit: Union[Snowflake, Client], /) -> Optional[ApexExperimentAssignment]:
+        """Returns the experiment assignment for a given unit.
+
+        Parameters
+        -----------
+        unit: Union[:class:`~discord.abc.Snowflake`, :class:`~discord.Client`]
+            The unit to get the assignment for.
+            Can be a variety of different objects depending on the unit type.
+            Supports a :class:`~discord.Client` for installation-based experiments.
+
+        Returns
+        -------
+        Optional[:class:`ApexExperimentAssignment`]
+            The experiment assignment for the unit, or None if not assigned.
+        """
+        assignment = self._assignments.get(unit.id)  # type: ignore
+
+        if self.unit_type == ApexExperimentUnitType.guild:
+            user_assignment = self._assignments.get(self._state.self_id)
+
+            # User assignment overrides take priority
+            if user_assignment is not None and user_assignment.flags.override:
+                resolved_assignment = user_assignment
+
+            # Guild assignment overrides skip the eligibility gate
+            elif assignment is not None and assignment.flags.override:
+                resolved_assignment = assignment
+
+            # For regular guild assignments, we need to pass the eligibility gate
+            elif user_assignment is not None and user_assignment.flags.use_as_eligibility and assignment is not None:
+                resolved_assignment = assignment
+
+            # Neither override nor valid eligibility gate was found
+            else:
+                resolved_assignment = None
+
+        else:
+            # User or Installation experiments
+            resolved_assignment = assignment
+
+        # If the finalized assignment has the UseAsEligibility flag, we must ignore the assignment
+        # as it is only meant to be used as an eligibility gate for other assignments
+        if resolved_assignment is not None and resolved_assignment.flags.use_as_eligibility:
+            return None
+
+        return resolved_assignment

@@ -87,6 +87,7 @@ class PartialApplication(BaseApplication, DetectableApplication):
     team: NotRequired[Team]
     verify_key: str
     flags: int
+    new_flags: NotRequired[str]
     rpc_origins: NotRequired[List[str]]
     terms_of_service_url: NotRequired[str]
     privacy_policy_url: NotRequired[str]
@@ -267,7 +268,9 @@ class ApplicationActivityStatistics(_BaseActivityStatistics):
 
 class GlobalActivityStatistics(TypedDict):
     application_id: Snowflake
+    application: NotRequired[PartialApplication]
     user_id: Snowflake
+    user: NotRequired[PartialUser]
     duration: int
     updated_at: str
 
@@ -336,3 +339,8 @@ class UnverifiedApplication(TypedDict):
     name: str
     hash: str
     missing_data: List[str]
+
+
+class ExternalAsset(TypedDict):
+    url: str
+    external_asset_path: str

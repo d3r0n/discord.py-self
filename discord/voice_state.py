@@ -20,21 +20,6 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
 FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
-
-
-Some documentation to refer to:
-
-- Our main web socket (mWS) sends opcode 4 with a guild ID and channel ID.
-- The mWS receives VOICE_STATE_UPDATE and VOICE_SERVER_UPDATE.
-- We pull the session_id from VOICE_STATE_UPDATE.
-- We pull the token, endpoint and server_id from VOICE_SERVER_UPDATE.
-- Then we initiate the voice web socket (vWS) pointing to the endpoint.
-- We send opcode 0 with the user_id, server_id, session_id and token using the vWS.
-- The vWS sends back opcode 2 with an ssrc, port, modes(array) and heartbeat_interval.
-- We send a UDP discovery packet to endpoint:port and receive our IP and our port in LE.
-- Then we send our IP and port via vWS with opcode 1.
-- When that's all done, we receive opcode 4 from the vWS.
-- Finally we can transmit data to endpoint:port.
 """
 
 from __future__ import annotations
@@ -44,14 +29,17 @@ import socket
 import asyncio
 import logging
 import threading
+import uuid
+from typing import TYPE_CHECKING, Optional, Dict, List, Callable, Coroutine, Any, Tuple, Sequence, Set
 
-from typing import TYPE_CHECKING, Optional, Dict, List, Callable, Coroutine, Any, Tuple
+from curl_cffi import CurlError
 
 from .enums import Enum
 from .utils import MISSING, sane_wait_for
 from .errors import ConnectionClosed
 from .backoff import ExponentialBackoff
 from .gateway import DiscordVoiceWebSocket
+from .voice_media import VoiceStream
 
 if TYPE_CHECKING:
     from . import abc
@@ -60,15 +48,24 @@ if TYPE_CHECKING:
     from .member import VoiceState
     from .voice_client import VoiceClient
 
+    from .types.gateway import VoiceStateUpdateEvent as VoiceStateUpdatePayload
     from .types.voice import (
-        GuildVoiceState as GuildVoiceStatePayload,
-        VoiceServerUpdate as VoiceServerUpdatePayload,
         TransportEncryptionModes,
+        VoiceServerUpdate as VoiceServerUpdatePayload,
+        VoiceStream as VoiceStreamPayload,
     )
 
     WebsocketHook = Optional[Callable[[DiscordVoiceWebSocket, Dict[str, Any]], Coroutine[Any, Any, Any]]]
     SocketReaderCallback = Callable[[bytes], Any]
 
+has_dave: bool
+
+try:
+    import davey  # type: ignore
+
+    has_dave = True
+except ImportError:
+    has_dave = False
 
 __all__ = ('VoiceConnectionState',)
 
@@ -156,16 +153,20 @@ class SocketReader(threading.Thread):
             if not readable:
                 continue
 
-            try:
-                data = self.state.socket.recv(2048)
-            except OSError:
-                _log.debug('Error reading from socket in %s, this should be safe to ignore.', self, exc_info=True)
-            else:
-                for cb in self._callbacks:
-                    try:
-                        cb(data)
-                    except Exception:
-                        _log.exception('Error calling %s in %s.', cb, self)
+            while not self._end.is_set():
+                try:
+                    data = self.state.socket.recv(2048)
+                except BlockingIOError:
+                    break
+                except OSError:
+                    _log.debug('Error reading from socket in %s, this should be safe to ignore.', self, exc_info=True)
+                    break
+                else:
+                    for cb in self._callbacks:
+                        try:
+                            cb(data)
+                        except Exception:
+                            _log.exception('Error calling %s in %s.', cb, self)
 
 
 class ConnectionFlowState(Enum):
@@ -200,16 +201,33 @@ class VoiceConnectionState:
         self.session_id: Optional[str] = None
         self.endpoint: Optional[str] = None
         self.endpoint_ip: Optional[str] = None
+        self.channel_id: int = voice_client.channel.id
         self.server_id: Optional[int] = None
         self.ip: Optional[str] = None
         self.port: Optional[int] = None
         self.voice_port: Optional[int] = None
         self.secret_key: List[int] = MISSING
         self.ssrc: int = MISSING
+        self.ssrc_user_ids: Dict[int, int] = {}
+        self.rtx_ssrc_media_ssrcs: Dict[int, int] = {}
+        self.video_ssrcs: Set[int] = set()
+        self.video_streams: Dict[str, VoiceStream] = {stream.rid: stream.replace() for stream in voice_client.video_streams}
+        self.video_states: Dict[int, Dict[str, Any]] = {}
+        self.media_sink_wants: Dict[str, Any] = {}
+        self.experiments: List[str] = []
+        self.selected_experiments: List[str] = []
+        self.rtc_connection_id: str = str(uuid.uuid4())
         self.mode: TransportEncryptionModes = MISSING
+        self.audio_codec: Optional[str] = None
+        self.video_codec: Optional[str] = None
+        self.media_session_id: Optional[str] = None
+        self.keyframe_interval: Optional[int] = None
         self.socket: socket.socket = MISSING
         self.ws: DiscordVoiceWebSocket = MISSING
-
+        self.dave_session: Optional[davey.DaveSession] = None
+        self.dave_protocol_version: int = 0
+        self.dave_pending_transitions: Dict[int, int] = {}
+        self.dave_downgraded: bool = False
         self._state: ConnectionFlowState = ConnectionFlowState.disconnected
         self._expecting_disconnect: bool = False
         self._connected = threading.Event()
@@ -217,8 +235,79 @@ class VoiceConnectionState:
         self._disconnected = asyncio.Event()
         self._runner: Optional[asyncio.Task] = None
         self._connector: Optional[asyncio.Task] = None
-        self._socket_reader = SocketReader(self)
-        self._socket_reader.start()
+        self._socket_reader: SocketReader = self._create_socket_reader()
+
+    def update_video_streams(self, data: Sequence[VoiceStreamPayload]) -> None:
+        for payload in data:
+            rid = payload['rid']
+            stream = self.video_streams.get(rid)
+            if stream is None:
+                self.video_streams[rid] = VoiceStream.from_dict(payload)
+                continue
+
+            stream._update(payload)
+
+    @staticmethod
+    def _video_state_ssrcs(data: Dict[str, Any], *, include_audio: bool = True) -> Tuple[int, ...]:
+        ssrcs: List[int] = []
+
+        keys = ('audio_ssrc', 'video_ssrc', 'rtx_ssrc') if include_audio else ('video_ssrc', 'rtx_ssrc')
+        for key in keys:
+            ssrc = data.get(key)
+            if isinstance(ssrc, int):
+                ssrcs.append(ssrc)
+
+        for stream in data.get('streams') or ():
+            if not isinstance(stream, VoiceStream):
+                continue
+
+            for ssrc in (stream.ssrc, stream.rtx_ssrc):
+                if isinstance(ssrc, int):
+                    ssrcs.append(ssrc)
+
+        return tuple(ssrcs)
+
+    @staticmethod
+    def _video_state_rtx_ssrcs(data: Dict[str, Any]) -> Dict[int, int]:
+        pairs: Dict[int, int] = {}
+        video_ssrc = data.get('video_ssrc')
+        rtx_ssrc = data.get('rtx_ssrc')
+        if isinstance(video_ssrc, int) and isinstance(rtx_ssrc, int):
+            pairs[rtx_ssrc] = video_ssrc
+
+        for stream in data.get('streams') or ():
+            if not isinstance(stream, VoiceStream):
+                continue
+            if isinstance(stream.ssrc, int) and isinstance(stream.rtx_ssrc, int):
+                pairs[stream.rtx_ssrc] = stream.ssrc
+
+        return pairs
+
+    def clear_ssrc_mappings(self) -> None:
+        self.ssrc_user_ids.clear()
+        self.rtx_ssrc_media_ssrcs.clear()
+        self.video_ssrcs.clear()
+        self.video_states.clear()
+
+    def update_video_state(self, user_id: int, data: Dict[str, Any]) -> None:
+        previous = self.video_states.get(user_id)
+        if previous is not None:
+            for ssrc in self._video_state_ssrcs(previous, include_audio=False):
+                if self.ssrc_user_ids.get(ssrc) == user_id:
+                    del self.ssrc_user_ids[ssrc]
+                self.video_ssrcs.discard(ssrc)
+
+            for rtx_ssrc, media_ssrc in self._video_state_rtx_ssrcs(previous).items():
+                if self.rtx_ssrc_media_ssrcs.get(rtx_ssrc) == media_ssrc:
+                    del self.rtx_ssrc_media_ssrcs[rtx_ssrc]
+
+        self.video_states[user_id] = data
+
+        for ssrc in self._video_state_ssrcs(data):
+            self.ssrc_user_ids[ssrc] = user_id
+
+        self.video_ssrcs.update(self._video_state_ssrcs(data, include_audio=False))
+        self.rtx_ssrc_media_ssrcs.update(self._video_state_rtx_ssrcs(data))
 
     @property
     def state(self) -> ConnectionFlowState:
@@ -253,7 +342,69 @@ class VoiceConnectionState:
     def self_voice_state(self) -> Optional[VoiceState]:
         return self.guild.me.voice if self.guild else self.voice_client._state.user.voice  # type: ignore
 
-    async def voice_state_update(self, data: GuildVoiceStatePayload) -> None:
+    @property
+    def max_dave_protocol_version(self) -> int:
+        return davey.DAVE_PROTOCOL_VERSION if has_dave else 0
+
+    @property
+    def can_encrypt(self) -> bool:
+        return self.dave_protocol_version != 0 and self.dave_session is not None and self.dave_session.ready
+
+    @property
+    def dave_group_id(self) -> int:
+        # Property exists because streams don't use either channel ID as the group ID :(
+        return self.channel_id
+
+    async def reinit_dave_session(self) -> None:
+        if self.dave_protocol_version > 0:
+            if not has_dave:
+                raise RuntimeError('davey library needed in order to use E2EE voice')
+            if self.dave_session is not None:
+                self.dave_session.reinit(self.dave_protocol_version, self.user.id, self.dave_group_id)
+            else:
+                self.dave_session = davey.DaveSession(self.dave_protocol_version, self.user.id, self.dave_group_id)
+
+            if self.dave_session is not None:
+                await self.voice_client.ws.send_binary(
+                    DiscordVoiceWebSocket.MLS_KEY_PACKAGE, self.dave_session.get_serialized_key_package()
+                )
+        elif self.dave_session:
+            self.dave_session.reset()
+            self.dave_session.set_passthrough_mode(True, 10)
+
+    async def _recover_from_invalid_commit(self, transition_id: int) -> None:
+        payload = {
+            'op': DiscordVoiceWebSocket.MLS_INVALID_COMMIT_WELCOME,
+            'd': {
+                'transition_id': transition_id,
+            },
+        }
+
+        await self.voice_client.ws.send_as_json(payload)
+        await self.reinit_dave_session()
+
+    async def _execute_transition(self, transition_id: int) -> None:
+        _log.debug('Executing transition ID %d.', transition_id)
+        if transition_id not in self.dave_pending_transitions:
+            _log.warning("Received execute transition, but we don't have a pending transition for ID %d.", transition_id)
+            return
+
+        old_version = self.dave_protocol_version
+        self.dave_protocol_version = self.dave_pending_transitions.pop(transition_id)
+
+        if old_version != self.dave_protocol_version and self.dave_protocol_version == 0:
+            self.dave_downgraded = True
+            _log.debug('DAVE Session downgraded.')
+        elif transition_id > 0 and self.dave_downgraded:
+            self.dave_downgraded = False
+            if self.dave_session:
+                self.dave_session.set_passthrough_mode(True, 10)
+            _log.debug('DAVE Session upgraded.')
+
+        # In the future, the session should be signaled too, but for now theres just v1
+        _log.debug('Transition ID %d executed.', transition_id)
+
+    async def voice_state_update(self, data: VoiceStateUpdatePayload) -> None:
         channel_id = data['channel_id']
 
         if channel_id is None:
@@ -278,7 +429,7 @@ class VoiceConnectionState:
                 self.state = ConnectionFlowState.got_voice_state_update
 
                 # we moved ourselves
-                if channel_id != self.voice_client.channel.id:
+                if channel_id != self.channel_id:
                     self._update_voice_channel(channel_id)
             else:
                 self.state = ConnectionFlowState.got_both_voice_updates
@@ -288,18 +439,19 @@ class VoiceConnectionState:
             self._update_voice_channel(channel_id)
 
         elif self.state is not ConnectionFlowState.disconnected:
-            if channel_id != self.voice_client.channel.id:
+            if channel_id != self.channel_id:
                 # For some unfortunate reason we were moved during the connection flow
                 _log.info('Handling channel move while connecting...')
 
                 self._update_voice_channel(channel_id)
+                voice_state = self.self_voice_state or self
                 await self.soft_disconnect(with_state=ConnectionFlowState.got_voice_state_update)
                 await self.connect(
                     reconnect=self.reconnect,
                     timeout=self.timeout,
-                    self_deaf=(self.self_voice_state or self).self_deaf,
-                    self_mute=(self.self_voice_state or self).self_mute,
-                    self_video=(self.self_voice_state or self).self_video,
+                    self_deaf=voice_state.self_deaf,
+                    self_mute=voice_state.self_mute,
+                    self_video=voice_state.self_video,
                     resume=False,
                     wait=False,
                 )
@@ -312,7 +464,7 @@ class VoiceConnectionState:
         previous_endpoint = self.endpoint
 
         self.token = data['token']
-        self.server_id = int(data.get('guild_id') or data['channel_id'])
+        self.server_id = int(data.get('guild_id') or data['channel_id'])  # type: ignore
         endpoint = data.get('endpoint')
 
         if self.token is None or endpoint is None:
@@ -322,7 +474,7 @@ class VoiceConnectionState:
             )
             return
 
-        self.endpoint, _, _ = endpoint.rpartition(':')
+        self.endpoint = endpoint
         if self.endpoint.startswith('wss://'):
             # Just in case, strip it off since we're going to add it later
             self.endpoint = self.endpoint[6:]
@@ -339,7 +491,7 @@ class VoiceConnectionState:
                 self.state = ConnectionFlowState.got_both_voice_updates
 
         elif self.state is ConnectionFlowState.connected:
-            _log.debug('Got VOICE_SERVER_UPDATE, closing old voice gateway.')
+            _log.debug('Got VOICE_SERVER_UPDATE, closing old voice socket.')
             await self.ws.close(4014)
             self.state = ConnectionFlowState.got_voice_server_update
 
@@ -349,13 +501,14 @@ class VoiceConnectionState:
                 return
             _log.debug('Unexpected VOICE_SERVER_UPDATE event, attempting to handle...')
 
+            voice_state = self.self_voice_state or self
             await self.soft_disconnect(with_state=ConnectionFlowState.got_voice_server_update)
             await self.connect(
                 reconnect=self.reconnect,
                 timeout=self.timeout,
-                self_deaf=(self.self_voice_state or self).self_deaf,
-                self_mute=(self.self_voice_state or self).self_mute,
-                self_video=(self.self_voice_state or self).self_video,
+                self_deaf=voice_state.self_deaf,
+                self_mute=voice_state.self_mute,
+                self_video=voice_state.self_video,
                 resume=False,
                 wait=False,
             )
@@ -382,6 +535,9 @@ class VoiceConnectionState:
 
         self.timeout = timeout
         self.reconnect = reconnect
+        self.self_deaf = self_deaf
+        self.self_mute = self_mute
+        self.self_video = self_video
         self._connector = self.voice_client.loop.create_task(
             self._wrap_connect(reconnect, timeout, self_deaf, self_mute, self_video, resume), name='Voice connector'
         )
@@ -462,11 +618,11 @@ class VoiceConnectionState:
             _log.debug('Ignoring exception disconnecting from voice.', exc_info=True)
         finally:
             self.state = ConnectionFlowState.disconnected
-            self._socket_reader.pause()
+            self._pause_socket_reader()
 
             # Stop threads before we unlock waiters so they end properly
             if cleanup:
-                self._socket_reader.stop()
+                self._stop_socket_reader()
                 self.voice_client.stop()
 
             # Flip the connected event to unlock any waiters
@@ -509,7 +665,7 @@ class VoiceConnectionState:
             _log.debug('Ignoring exception soft disconnecting from voice.', exc_info=True)
         finally:
             self.state = with_state
-            self._socket_reader.pause()
+            self._pause_socket_reader()
 
             if self.socket:
                 self.socket.close()
@@ -523,7 +679,7 @@ class VoiceConnectionState:
             await self.disconnect(wait=True)
             return
 
-        if self.voice_client.channel and channel.id == self.voice_client.channel.id:
+        if self.voice_client.channel and channel.id == self.channel_id:
             return
 
         previous_state = self.state
@@ -556,13 +712,36 @@ class VoiceConnectionState:
     def send_packet(self, packet: bytes) -> None:
         self.socket.sendall(packet)
 
+    def send_packets(self, packets: Sequence[bytes]) -> Tuple[int, int]:
+        socket = self.socket
+        octets = 0
+        for packet in packets:
+            socket.sendall(packet)
+            octets += len(packet)
+        return len(packets), octets
+
     def add_socket_listener(self, callback: SocketReaderCallback) -> None:
         _log.debug('Registering voice socket listener callback %s.', callback)
+        if self._socket_reader is MISSING:
+            raise RuntimeError('Socket reader is not available for this voice connection')
         self._socket_reader.register(callback)
 
     def remove_socket_listener(self, callback: SocketReaderCallback) -> None:
         _log.debug('Unregistering voice socket listener callback %s.', callback)
+        if self._socket_reader is MISSING:
+            return
         self._socket_reader.unregister(callback)
+
+    def _create_socket_reader(self) -> SocketReader:
+        reader = SocketReader(self)
+        reader.start()
+        return reader
+
+    def _pause_socket_reader(self) -> None:
+        self._socket_reader.pause()
+
+    def _stop_socket_reader(self) -> None:
+        self._socket_reader.stop()
 
     def _inside_runner(self) -> bool:
         return self._runner is not None and asyncio.current_task() == self._runner
@@ -590,7 +769,7 @@ class VoiceConnectionState:
     async def _voice_disconnect(self) -> None:
         _log.info(
             'The voice handshake is being terminated for channel ID %s (guild ID %s).',
-            self.voice_client.channel.id,
+            self.channel_id,
             self.guild.id if self.guild else '"private"',
         )
         self.state = ConnectionFlowState.disconnected
@@ -602,7 +781,10 @@ class VoiceConnectionState:
         self._disconnected.clear()
 
     async def _connect_websocket(self, resume: bool) -> DiscordVoiceWebSocket:
-        ws = await DiscordVoiceWebSocket.from_connection_state(self, resume=resume, hook=self.hook)
+        seq_ack = -1
+        if self.ws is not MISSING:
+            seq_ack = self.ws.seq_ack
+        ws = await DiscordVoiceWebSocket.from_connection_state(self, resume=resume, hook=self.hook, seq_ack=seq_ack)
         self.state = ConnectionFlowState.websocket_connected
         return ws
 
@@ -616,8 +798,14 @@ class VoiceConnectionState:
 
     def _create_socket(self) -> None:
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        for option in (socket.SO_RCVBUF, socket.SO_SNDBUF):
+            try:
+                self.socket.setsockopt(socket.SOL_SOCKET, option, 4 * 1024 * 1024)
+            except OSError:
+                pass
         self.socket.setblocking(False)
-        self._socket_reader.resume()
+        if self._socket_reader is not MISSING:
+            self._socket_reader.resume()
 
     async def _poll_voice_ws(self, reconnect: bool) -> None:
         backoff = ExponentialBackoff()
@@ -626,24 +814,29 @@ class VoiceConnectionState:
                 await self.ws.poll_event()
             except asyncio.CancelledError:
                 return
-            except (ConnectionClosed, asyncio.TimeoutError) as exc:
-                if isinstance(exc, ConnectionClosed):
+            except (CurlError, ConnectionClosed, asyncio.TimeoutError) as exc:
+                if isinstance(exc, (ConnectionClosed, CurlError)):
                     # The following close codes are undocumented so I will document them here.
                     # 1000 - normal closure (obviously)
                     # 4014 - we were externally disconnected (voice channel deleted, we were moved, etc)
-                    # 4015 - voice server has crashed
-                    if exc.code in (1000, 4015):
+                    # 4015 - voice server has crashed, we should resume
+                    # 4021 - rate limited, we should not reconnect
+                    # 4022 - call terminated, similar to 4014
+
+                    code = exc.code if isinstance(exc, ConnectionClosed) else self.ws._close_code
+
+                    if code == 1000:
                         # Don't call disconnect a second time if the websocket closed from a disconnect call
                         if not self._expecting_disconnect:
-                            _log.info('Disconnecting from voice normally, close code %d.', exc.code)
+                            _log.info('Disconnecting from voice normally, close code %d.', code)
                             await self.disconnect()
                         break
 
-                    if exc.code == 4014:
+                    if code in (4014, 4022):
                         # We were disconnected by discord
                         # This condition is a race between the main ws event and the voice ws closing
                         if self._disconnected.is_set():
-                            _log.info('Disconnected from voice by Discord, close code %d.', exc.code)
+                            _log.info('Disconnected from voice by Discord, close code %d.', code)
                             await self.disconnect()
                             break
 
@@ -659,7 +852,44 @@ class VoiceConnectionState:
                         else:
                             continue
 
-                    _log.debug('Not handling close code %s (%s).', exc.code, exc.reason or 'no reason')
+                    if code == 4021:
+                        _log.warning('We are being rate limited while trying to connect to voice. Disconnecting...')
+                        if self.state is not ConnectionFlowState.disconnected:
+                            await self.disconnect()
+                        break
+
+                    # We catch 0/None here too because CurlError is typically a network issue that doesn't have a code
+                    if code == 4015 or not code:
+                        _log.info('Disconnected from voice, attempting a resume...')
+                        voice_state = self.self_voice_state or self
+                        try:
+                            await self._connect(
+                                reconnect=reconnect,
+                                timeout=self.timeout,
+                                self_deaf=voice_state.self_deaf,
+                                self_mute=voice_state.self_mute,
+                                self_video=voice_state.self_video,
+                                resume=True,
+                            )
+                        except asyncio.TimeoutError:
+                            _log.info('Could not resume the voice connection. Disconnecting...')
+                            if self.state is not ConnectionFlowState.disconnected:
+                                await self.disconnect()
+                            break
+                        else:
+                            _log.info('Successfully resumed voice connection.')
+                            continue
+
+                    if not code and self._expecting_disconnect:
+                        # Don't let disconnects bleed into the disconnect loop
+                        # as *sent* close codes may not be provided here
+                        break
+
+                    _log.debug(
+                        'Not handling voice socket close code %s (reason: %r).',
+                        code,
+                        getattr(exc, 'reason', None) or 'No reason',
+                    )
 
                 if not reconnect:
                     await self.disconnect()
@@ -670,13 +900,14 @@ class VoiceConnectionState:
                 await asyncio.sleep(retry)
                 await self.disconnect(cleanup=False)
 
+                voice_state = self.self_voice_state or self
                 try:
                     await self._connect(
                         reconnect=reconnect,
                         timeout=self.timeout,
-                        self_deaf=(self.self_voice_state or self).self_deaf,
-                        self_mute=(self.self_voice_state or self).self_mute,
-                        self_video=(self.self_voice_state or self).self_video,
+                        self_deaf=voice_state.self_deaf,
+                        self_mute=voice_state.self_mute,
+                        self_video=voice_state.self_video,
                         resume=False,
                     )
                 except asyncio.TimeoutError:
@@ -717,4 +948,10 @@ class VoiceConnectionState:
         self.state = ConnectionFlowState.set_guild_voice_state
 
     def _update_voice_channel(self, channel_id: Optional[int]) -> None:
-        self.voice_client.channel = channel_id and self.guild.get_channel(channel_id) if self.guild else self.voice_client._state._get_private_channel(channel_id)  # type: ignore
+        if channel_id is not None:
+            self.channel_id = channel_id
+        self.voice_client.channel = (
+            channel_id and self.guild.get_channel(channel_id)
+            if self.guild
+            else self.voice_client._state._get_private_channel(channel_id)
+        )  # type: ignore

@@ -108,7 +108,7 @@ class Relationship(Hashable):
 
         if not getattr(self, 'user', None):
             if 'user' in data:
-                self.user = self._state.store_user(data['user'])  # type: ignore
+                self.user = self._state.store_user(data['user'])
             else:
                 user_id = int(data['id'])
                 self.user = self._state.get_user(user_id) or Object(id=user_id)  # type: ignore # Lying for better developer UX
@@ -234,7 +234,7 @@ class Relationship(Hashable):
 
     @property
     def activities(self) -> Tuple[ActivityTypes, ...]:
-        """Tuple[Union[:class:`BaseActivity`, :class:`Spotify`]]: Returns the activities that
+        """Tuple[:class:`BaseActivity`, ...]: Returns the activities that
         the user is currently doing.
 
         .. versionadded:: 2.0
@@ -253,7 +253,7 @@ class Relationship(Hashable):
 
     @property
     def activity(self) -> Optional[ActivityTypes]:
-        """Optional[Union[:class:`BaseActivity`, :class:`Spotify`]]: Returns the primary
+        """Optional[:class:`BaseActivity`]: Returns the primary
         activity the user is currently doing. Could be ``None`` if no activity is being done.
 
         .. versionadded:: 2.0
@@ -274,6 +274,22 @@ class Relationship(Hashable):
         """
         if self.activities:
             return self.activities[0]
+
+    @property
+    def hidden_activities(self) -> Tuple[ActivityTypes, ...]:
+        """Tuple[:class:`BaseActivity`, ...]: Returns the activities that
+        the user is currently doing but has set as hidden.
+
+        Hidden activities are provided when you are participating in a shared activity with
+        a user that is invisible or has set their activity settings to private.
+
+        .. versionadded:: 2.1
+
+        .. note::
+
+            This is only provided for type :class:`RelationshipType.friend` and :class:`RelationshipType.implicit` relationships.
+        """
+        return self.presence.hidden_activities
 
     async def delete(self) -> None:
         """|coro|
@@ -300,18 +316,29 @@ class Relationship(Hashable):
 
         await self._state.http.remove_relationship(self.user.id, action=action)
 
-    async def accept(self) -> None:
+    async def accept(self, *, confirm_stranger_request: bool = False) -> None:
         """|coro|
 
         Accepts the relationship request. Only applicable for
         type :class:`RelationshipType.incoming_request`.
+
+        Parameters
+        -----------
+        confirm_stranger_request: :class:`bool`
+            Friend requests from users Discord ascertains to be strangers require additional confirmation to accept.
+
+            Without this confirmation, the acceptance will fail, prompting clients to show a warning before retrying.
+
+            .. versionadded:: 2.2
 
         Raises
         -------
         HTTPException
             Accepting the relationship failed.
         """
-        await self._state.http.add_relationship(self.user.id, action=RelationshipAction.accept_request)
+        await self._state.http.add_relationship(
+            self.user.id, action=RelationshipAction.accept_request, confirm_stranger_request=confirm_stranger_request
+        )
 
     async def edit(self, nick: Optional[str] = MISSING) -> None:
         """|coro|
@@ -411,26 +438,18 @@ class FriendSuggestion(Hashable):
             f'<FriendSuggestion user={self.user!r} reasons={self.reasons!r} from_user_contacts={self.from_user_contacts!r}>'
         )
 
-    async def accept(self, *, friend_token: str = MISSING) -> None:
+    async def accept(self) -> None:
         """|coro|
 
         Accepts the friend suggestion.
         This creates a :class:`Relationship` of type :class:`RelationshipType.outgoing_request`.
-
-        Parameters
-        ----------
-        friend_token: :class:`str`
-            The friend token to accept the friend suggestion with.
-            This will bypass the user's friend request settings.
 
         Raises
         -------
         HTTPException
             Accepting the relationship failed.
         """
-        await self._state.http.add_relationship(
-            self.user.id, friend_token=friend_token or None, action=RelationshipAction.friend_suggestion
-        )
+        await self._state.http.add_relationship(self.user.id, action=RelationshipAction.friend_suggestion)
 
     async def delete(self) -> None:
         """|coro|

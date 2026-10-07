@@ -30,9 +30,7 @@ import re
 import io
 from os import PathLike
 from typing import (
-    AsyncIterator,
     Dict,
-    Collection,
     TYPE_CHECKING,
     Literal,
     Sequence,
@@ -55,7 +53,6 @@ from .calls import CallMessage
 from .enums import (
     MessageType,
     ChannelType,
-    ApplicationCommandType,
     PurchaseNotificationType,
     MessageReferenceType,
     try_enum,
@@ -74,8 +71,6 @@ from .sticker import StickerItem, GuildSticker
 from .threads import Thread
 from .channel import PartialMessageable
 from .interactions import Interaction
-from .commands import MessageCommand
-from .abc import _handle_commands
 from .application import IntegrationApplication, PartialApplication
 from .poll import Poll
 
@@ -98,7 +93,7 @@ if TYPE_CHECKING:
 
     from .types.interactions import MessageInteraction as MessageInteractionPayload
 
-    from .types.components import MessageActionRow as ComponentPayload
+    from .types.components import Component as ComponentPayload
     from .types.threads import ThreadArchiveDuration
     from .types.member import (
         Member as MemberPayload,
@@ -109,7 +104,7 @@ if TYPE_CHECKING:
     from .types.gateway import MessageReactionRemoveEvent, MessageUpdateEvent
     from .abc import Snowflake
     from .abc import GuildChannel, MessageableChannel
-    from .components import ActionRow
+    from .components import Component
     from .file import _FileBase
     from .state import ConnectionState
     from .mentions import AllowedMentions
@@ -267,7 +262,7 @@ class Attachment(Hashable):
         self.clip_created_at: Optional[datetime.datetime] = utils.parse_time(data.get('clip_created_at'))
         self.clip_participants: List[User] = [state.create_user(d) for d in data.get('clip_participants', [])]
         self.application: Optional[PartialApplication] = (
-            PartialApplication(data=data['application'], state=state) if 'application' in data else None
+            PartialApplication(data=data['application'], state=state) if data.get('application') else None  # type: ignore
         )
 
         waveform = data.get('waveform')
@@ -479,7 +474,7 @@ class DeletedReferencedMessage:
         self._parent: MessageReference = parent
 
     def __repr__(self) -> str:
-        return f"<DeletedReferencedMessage id={self.id} channel_id={self.channel_id} guild_id={self.guild_id!r}>"
+        return f'<DeletedReferencedMessage id={self.id} channel_id={self.channel_id} guild_id={self.guild_id!r}>'
 
     @property
     def id(self) -> int:
@@ -535,7 +530,7 @@ class MessageSnapshot(Hashable):
         Extra features of the the message snapshot.
     stickers: List[:class:`StickerItem`]
         A list of sticker items given to the message.
-    components: List[Union[:class:`ActionRow`, :class:`Button`, :class:`SelectMenu`]]
+    components: List[:class:`Component`]]
         A list of components in the message.
     """
 
@@ -580,11 +575,11 @@ class MessageSnapshot(Hashable):
         self.flags: MessageFlags = MessageFlags._from_value(data.get('flags', 0))
         self.stickers: List[StickerItem] = [StickerItem(data=d, state=state) for d in data.get('sticker_items', [])]
 
-        self.components: List[ComponentPayload] = []
+        self.components: List[Component] = []
         for component_data in data.get('components', []):
             component = _component_factory(component_data)
             if component is not None:
-                self.components.append(component)  # type: ignore
+                self.components.append(component)
 
         self._state: ConnectionState = state
 
@@ -1065,8 +1060,7 @@ class PartialMessage(Hashable):
         attachments: Sequence[Union[Attachment, _FileBase]] = ...,
         delete_after: Optional[float] = ...,
         allowed_mentions: Optional[AllowedMentions] = ...,
-    ) -> Message:
-        ...
+    ) -> Message: ...
 
     @overload
     async def edit(
@@ -1076,8 +1070,7 @@ class PartialMessage(Hashable):
         attachments: Sequence[Union[Attachment, _FileBase]] = ...,
         delete_after: Optional[float] = ...,
         allowed_mentions: Optional[AllowedMentions] = ...,
-    ) -> Message:
-        ...
+    ) -> Message: ...
 
     async def edit(
         self,
@@ -1545,8 +1538,7 @@ class PartialMessage(Hashable):
         suppress_embeds: bool = ...,
         silent: bool = ...,
         poll: Poll = ...,
-    ) -> Message:
-        ...
+    ) -> Message: ...
 
     @overload
     async def reply(
@@ -1563,8 +1555,7 @@ class PartialMessage(Hashable):
         suppress_embeds: bool = ...,
         silent: bool = ...,
         poll: Poll = ...,
-    ) -> Message:
-        ...
+    ) -> Message: ...
 
     @overload
     async def reply(
@@ -1581,8 +1572,7 @@ class PartialMessage(Hashable):
         suppress_embeds: bool = ...,
         silent: bool = ...,
         poll: Poll = ...,
-    ) -> Message:
-        ...
+    ) -> Message: ...
 
     @overload
     async def reply(
@@ -1599,8 +1589,7 @@ class PartialMessage(Hashable):
         suppress_embeds: bool = ...,
         silent: bool = ...,
         poll: Poll = ...,
-    ) -> Message:
-        ...
+    ) -> Message: ...
 
     async def reply(self, content: Optional[str] = None, **kwargs: Any) -> Message:
         """|coro|
@@ -1639,12 +1628,10 @@ class PartialMessage(Hashable):
         *,
         allowed_mentions: AllowedMentions = ...,
         mention_author: bool = ...,
-    ) -> Message:
-        ...
+    ) -> Message: ...
 
     @overload
-    async def greet(self, sticker: Union[GuildSticker, StickerItem]) -> Message:
-        ...
+    async def greet(self, sticker: Union[GuildSticker, StickerItem]) -> Message: ...
 
     async def greet(self, sticker: Union[GuildSticker, StickerItem], **kwargs: Any) -> Message:
         """|coro|
@@ -1886,7 +1873,7 @@ class Message(PartialMessage, Hashable):
         A list of sticker items given to the message.
 
         .. versionadded:: 1.6
-    components: List[Union[:class:`ActionRow`, :class:`Button`, :class:`SelectMenu`]]
+    components: List[:class:`Component`]
         A list of components in the message.
 
         .. versionadded:: 2.0
@@ -1987,6 +1974,7 @@ class Message(PartialMessage, Hashable):
         'total_results',
         'analytics_id',
         'doing_deep_historical_index',
+        '_pinned_at',
     )
 
     if TYPE_CHECKING:
@@ -1996,7 +1984,7 @@ class Message(PartialMessage, Hashable):
         mentions: List[Union[User, Member]]
         author: Union[User, Member]
         role_mentions: List[Role]
-        components: List[ActionRow]
+        components: List[Component]
 
     def __init__(
         self,
@@ -2027,10 +2015,13 @@ class Message(PartialMessage, Hashable):
         self.stickers: List[StickerItem] = [StickerItem(data=d, state=state) for d in data.get('sticker_items', [])]
         self.call: Optional[CallMessage] = None
         self.interaction: Optional[Interaction] = None
+        # Set by Messageable.pins
+        self._pinned_at: Optional[datetime.datetime] = None
 
         self.poll: Optional[Poll] = None
         try:
-            self.poll = Poll._from_data(data=data['poll'], message=self, state=state)
+            poll = data['poll']  # pyright: ignore[reportTypedDictNotRequiredAccess]
+            self.poll = Poll._from_data(data=poll, message=self, state=state)
         except KeyError:
             pass
 
@@ -2051,7 +2042,7 @@ class Message(PartialMessage, Hashable):
 
         if self.guild is not None:
             try:
-                thread = data['thread']
+                thread = data['thread']  # pyright: ignore[reportTypedDictNotRequiredAccess]
             except KeyError:
                 pass
             else:
@@ -2064,20 +2055,20 @@ class Message(PartialMessage, Hashable):
 
         self.application: Optional[IntegrationApplication] = None
         try:
-            application = data['application']
+            application = data['application']  # pyright: ignore[reportTypedDictNotRequiredAccess]
         except KeyError:
             pass
         else:
             self.application = IntegrationApplication(state=self._state, data=application)
 
         try:
-            ref = data['message_reference']
+            ref = data['message_reference']  # pyright: ignore[reportTypedDictNotRequiredAccess]
         except KeyError:
             self.reference = None
         else:
             self.reference = ref = MessageReference.with_state(state, ref)
             try:
-                resolved = data['referenced_message']
+                resolved = data['referenced_message']  # pyright: ignore[reportTypedDictNotRequiredAccess]
             except KeyError:
                 pass
             else:
@@ -2102,11 +2093,15 @@ class Message(PartialMessage, Hashable):
                     if self.reference.message_id:
                         self._state._update_poll_results(self, self.reference.message_id)
 
-        self.message_snapshots: List[MessageSnapshot] = MessageSnapshot._from_value(state, data.get('message_snapshots'), self.reference)  # type: ignore
+        self.message_snapshots: List[MessageSnapshot] = MessageSnapshot._from_value(
+            state,
+            data.get('message_snapshots'),
+            self.reference,  # type: ignore
+        )
 
         self.role_subscription: Optional[RoleSubscriptionInfo] = None
         try:
-            role_subscription = data['role_subscription_data']
+            role_subscription = data['role_subscription_data']  # pyright: ignore[reportTypedDictNotRequiredAccess]
         except KeyError:
             pass
         else:
@@ -2114,7 +2109,7 @@ class Message(PartialMessage, Hashable):
 
         self.purchase_notification: Optional[PurchaseNotification] = None
         try:
-            purchase_notification = data['purchase_notification']
+            purchase_notification = data['purchase_notification']  # pyright: ignore[reportTypedDictNotRequiredAccess]
         except KeyError:
             pass
         else:
@@ -2128,7 +2123,7 @@ class Message(PartialMessage, Hashable):
 
         for handler in ('author', 'member', 'mentions', 'mention_roles', 'call', 'interaction', 'components'):
             try:
-                getattr(self, f'_handle_{handler}')(data[handler])
+                getattr(self, f'_handle_{handler}')(data[handler])  # type: ignore
             except KeyError:
                 continue
 
@@ -2341,7 +2336,11 @@ class Message(PartialMessage, Hashable):
         channel = self.channel
         settings = guild.notification_settings if guild else state.client.notification_settings
 
-        if channel.type in (ChannelType.private, ChannelType.group) and not settings.muted and not channel.notification_settings.muted:  # type: ignore
+        if (
+            channel.type in (ChannelType.private, ChannelType.group)
+            and not settings.muted
+            and not (getattr(channel, 'notification_settings', None) and channel.notification_settings.muted)  # type: ignore
+        ):
             return True
         if state.user in self.mentions:
             return True
@@ -2386,7 +2385,7 @@ class Message(PartialMessage, Hashable):
     def clean_content(self) -> str:
         """:class:`str`: A property that returns the content in a "cleaned up"
         manner. This basically means that mentions are transformed
-        into the way the client shows it. e.g. ``<#id>`` will transform
+        into the way the client shows them. e.g. ``<#id>`` will transform
         into ``#name``.
 
         This will also transform @everyone and @here mentions into
@@ -2467,6 +2466,18 @@ class Message(PartialMessage, Hashable):
             # Fall back to guild threads in case one was created after the message
             return self._thread or self.guild.get_thread(self.id)
 
+    @property
+    def pinned_at(self) -> Optional[datetime.datetime]:
+        """Optional[:class:`datetime.datetime`]: An aware UTC datetime object containing the time
+        when the message was pinned.
+
+        .. note::
+            This is only set for messages that are returned by :meth:`abc.Messageable.pins`.
+
+        .. versionadded:: 2.1
+        """
+        return self._pinned_at
+
     def is_system(self) -> bool:
         """:class:`bool`: Whether the message is a system message.
 
@@ -2527,19 +2538,19 @@ class Message(PartialMessage, Hashable):
 
         if self.type is MessageType.new_member:
             formats = [
-                "{0} joined the party.",
-                "{0} is here.",
-                "Welcome, {0}. We hope you brought pizza.",
-                "A wild {0} appeared.",
-                "{0} just landed.",
-                "{0} just slid into the server.",
-                "{0} just showed up!",
-                "Welcome {0}. Say hi!",
-                "{0} hopped into the server.",
-                "Everyone welcome {0}!",
+                '{0} joined the party.',
+                '{0} is here.',
+                'Welcome, {0}. We hope you brought pizza.',
+                'A wild {0} appeared.',
+                '{0} just landed.',
+                '{0} just slid into the server.',
+                '{0} just showed up!',
+                'Welcome {0}. Say hi!',
+                '{0} hopped into the server.',
+                'Everyone welcome {0}!',
                 "Glad you're here, {0}.",
-                "Good to see you, {0}.",
-                "Yay you made it, {0}!",
+                'Good to see you, {0}.',
+                'Yay you made it, {0}!',
             ]
 
             created_at_ms = int(self.created_at.timestamp() * 1000)
@@ -2601,7 +2612,7 @@ class Message(PartialMessage, Hashable):
 
         if self.type is MessageType.thread_starter_message:
             if self.reference is None or self.reference.resolved is None:
-                return 'Sorry, we couldn\'t load the first message in this thread'
+                return "Sorry, we couldn't load the first message in this thread"
 
             # The resolved message for the reference will be a Message
             return self.reference.resolved.content  # type: ignore
@@ -2658,7 +2669,10 @@ class Message(PartialMessage, Hashable):
                 embed.fields,
                 name='poll_question_text',
             )
-            return f'{self.author.display_name}\'s poll {poll_title.value} has closed.'  # type: ignore
+            return f"{self.author.display_name}'s poll {poll_title.value} has closed."  # type: ignore
+
+        if self.type is MessageType.emoji_added:
+            return f'{self.author.name} added a new emoji, {self.content}'
 
         # Fallback for unknown message types
         return self.content
@@ -2672,8 +2686,7 @@ class Message(PartialMessage, Hashable):
         suppress: bool = ...,
         delete_after: Optional[float] = ...,
         allowed_mentions: Optional[AllowedMentions] = ...,
-    ) -> Message:
-        ...
+    ) -> Message: ...
 
     @overload
     async def edit(
@@ -2684,14 +2697,13 @@ class Message(PartialMessage, Hashable):
         suppress: bool = ...,
         delete_after: Optional[float] = ...,
         allowed_mentions: Optional[AllowedMentions] = ...,
-    ) -> Message:
-        ...
+    ) -> Message: ...
 
     async def edit(
         self,
         content: Optional[str] = MISSING,
         attachments: Sequence[Union[Attachment, _FileBase]] = MISSING,
-        suppress: bool = False,
+        suppress: bool = MISSING,
         delete_after: Optional[float] = None,
         allowed_mentions: Optional[AllowedMentions] = MISSING,
     ) -> Message:
@@ -2838,76 +2850,29 @@ class Message(PartialMessage, Hashable):
         """
         return await self.edit(attachments=[a for a in self.attachments if a not in attachments])
 
-    @utils.deprecated("Message.channel.application_commands")
-    def message_commands(
-        self,
-        query: Optional[str] = None,
-        *,
-        limit: Optional[int] = None,
-        command_ids: Optional[Collection[int]] = None,
-        application: Optional[Snowflake] = None,
-        with_applications: bool = True,
-    ) -> AsyncIterator[MessageCommand]:
-        """Returns a :term:`asynchronous iterator` of the message commands available to use on the message.
+    def is_forwardable(self) -> bool:
+        """:class:`bool`: Whether the message can be forwarded using :meth:`Message.forward`.
 
-        .. deprecated:: 2.1
+        A message is forwardable only if it is a basic message type and does not
+        contain a poll, call, or activity, and is not a system message.
 
-        Examples
-        ---------
-
-        Usage ::
-
-            async for command in message.message_commands():
-                print(command.name)
-
-        Flattening into a list ::
-
-            commands = [command async for command in message.message_commands()]
-            # commands is now a list of MessageCommand...
-
-        All parameters are optional.
-
-        Parameters
-        ----------
-        query: Optional[:class:`str`]
-            The query to search for. Specifying this limits results to 25 commands max.
-        limit: Optional[:class:`int`]
-            The maximum number of commands to send back. If ``None``, returns all commands.
-        command_ids: Optional[List[:class:`int`]]
-            List of up to 100 command IDs to search for. If the command doesn't exist, it won't be returned.
-
-            If ``limit`` is passed alongside this parameter, this parameter will serve as a "preferred commands" list.
-            This means that the endpoint will return the found commands + up to ``limit`` more, if available.
-        application: Optional[:class:`~discord.abc.Snowflake`]
-            Whether to return this application's commands. Always set to DM recipient in a private channel context.
-        with_applications: :class:`bool`
-            Whether to include applications in the response.
-
-        Raises
-        ------
-        TypeError
-            Both query and command_ids are passed.
-            Attempted to fetch commands in a DM with a non-bot user.
-        ValueError
-            The limit was not greater than or equal to 0.
-        HTTPException
-            Getting the commands failed.
-        ~discord.Forbidden
-            You do not have permissions to get the commands.
-        ~discord.HTTPException
-            The request to get the commands failed.
-
-        Yields
-        -------
-        :class:`.MessageCommand`
-            A message command.
+        .. versionadded:: 2.2
         """
-        return _handle_commands(
-            self,
-            ApplicationCommandType.message,
-            query=query,
-            limit=limit,
-            command_ids=command_ids,
-            application=application,
-            target=self,
-        )
+        if self.type not in (
+            MessageType.default,
+            MessageType.reply,
+            MessageType.chat_input_command,
+            MessageType.context_menu_command,
+        ):
+            return False
+
+        if self.poll is not None:
+            return False
+
+        if self.call is not None:
+            return False
+
+        if self.activity is not None:
+            return False
+
+        return True

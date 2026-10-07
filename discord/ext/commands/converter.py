@@ -24,6 +24,7 @@ DEALINGS IN THE SOFTWARE.
 
 from __future__ import annotations
 
+import datetime
 import inspect
 import re
 from typing import (
@@ -85,6 +86,7 @@ __all__ = (
     'clean_content',
     'Greedy',
     'Range',
+    'Timestamp',
     'run_converters',
 )
 
@@ -892,6 +894,28 @@ class GuildStickerConverter(IDConverter[discord.GuildSticker]):
         return result
 
 
+if TYPE_CHECKING:
+    Timestamp = datetime.datetime
+else:
+
+    class Timestamp(Converter[str]):
+        """Converts to a :class:`datetime.datetime`.
+
+        Conversion is attempted based on the :ddocs:`Discord style timestamp <reference#message-formatting>` input format.
+
+        .. versionadded:: 2.2
+
+        .. warning::
+            Due to a Discord limitation, no timezone is provided with the input. The UTC timezone has been supplanted instead.
+        """
+
+        async def convert(self, ctx: Context[BotT], argument: str) -> datetime.datetime:
+            match = discord.utils.TIMESTAMP_PATTERN.match(argument)
+            if not match:
+                raise BadTimestampArgument(argument)
+            return datetime.datetime.fromtimestamp(int(match[1]), tz=datetime.timezone.utc)
+
+
 class ScheduledEventConverter(IDConverter[discord.ScheduledEvent]):
     """Converts to a :class:`~discord.ScheduledEvent`.
 
@@ -1071,6 +1095,9 @@ class Greedy(List[T]):
         converter = getattr(self.converter, '__name__', repr(self.converter))
         return f'Greedy[{converter}]'
 
+    def __or__(self, value: Any) -> Any:
+        return Union[self, value]
+
     def __class_getitem__(cls, params: Union[Tuple[T], T]) -> Greedy[T]:
         if not isinstance(params, tuple):
             params = (params,)
@@ -1080,7 +1107,7 @@ class Greedy(List[T]):
 
         args = getattr(converter, '__args__', ())
         if discord.utils.PY_310 and converter.__class__ is types.UnionType:  # type: ignore
-            converter = Union[args]  # type: ignore
+            converter = Union[args]
 
         origin = getattr(converter, '__origin__', None)
 
@@ -1093,7 +1120,7 @@ class Greedy(List[T]):
         if origin is Union and type(None) in args:
             raise TypeError(f'Greedy[{converter!r}] is invalid.')
 
-        return cls(converter=converter)
+        return cls(converter=converter)  # type: ignore
 
     @property
     def constructed_converter(self) -> Any:
@@ -1223,7 +1250,7 @@ def _convert_to_bool(argument: str) -> bool:
         raise BadBoolArgument(lowered)
 
 
-_GenericAlias = type(List[T])
+_GenericAlias = type(List[T])  # type: ignore
 
 
 def is_generic_type(tp: Any, *, _GenericAlias: type = _GenericAlias) -> bool:
@@ -1274,7 +1301,7 @@ async def _actual_conversion(ctx: Context[BotT], converter: Any, argument: str, 
             else:
                 return await converter().convert(ctx, argument)
         elif isinstance(converter, Converter):
-            return await converter.convert(ctx, argument)  # type: ignore
+            return await converter.convert(ctx, argument)
     except CommandError:
         raise
     except Exception as exc:
@@ -1296,13 +1323,11 @@ async def _actual_conversion(ctx: Context[BotT], converter: Any, argument: str, 
 @overload
 async def run_converters(
     ctx: Context[BotT], converter: Union[Type[Converter[T]], Converter[T]], argument: str, param: Parameter
-) -> T:
-    ...
+) -> T: ...
 
 
 @overload
-async def run_converters(ctx: Context[BotT], converter: Any, argument: str, param: Parameter) -> Any:
-    ...
+async def run_converters(ctx: Context[BotT], converter: Any, argument: str, param: Parameter) -> Any: ...
 
 
 async def run_converters(ctx: Context[BotT], converter: Any, argument: str, param: Parameter) -> Any:

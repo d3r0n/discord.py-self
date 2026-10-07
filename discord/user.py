@@ -24,10 +24,12 @@ DEALINGS IN THE SOFTWARE.
 
 from __future__ import annotations
 
+import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple, TYPE_CHECKING, Union
 
 import discord.abc
 from .asset import Asset, AssetMixin
+from .collectible import Collectible
 from .colour import Colour
 from .enums import (
     Locale,
@@ -35,16 +37,18 @@ from .enums import (
     PremiumType,
     RelationshipAction,
     RelationshipType,
+    NameEffect,
+    NameFont,
     try_enum,
 )
-from .errors import ClientException, NotFound
+from .errors import NotFound
 from .flags import PublicUserFlags, PrivateUserFlags, PremiumUsageFlags, PurchasedFlags
 from .mixins import Hashable
+from .primary_guild import PrimaryGuild
 from .relationship import Relationship
 from .utils import (
     _bytes_to_base64_data,
     _get_as_snowflake,
-    cached_slot_property,
     copy_doc,
     parse_timestamp,
     snowflake_time,
@@ -54,8 +58,6 @@ from .voice_client import VoiceClient
 
 if TYPE_CHECKING:
     from typing_extensions import Self
-
-    from datetime import datetime
 
     from .abc import T as ConnectReturn, VocalChannel
     from .calls import PrivateCall
@@ -71,7 +73,10 @@ if TYPE_CHECKING:
         PartialUser as PartialUserPayload,
         User as UserPayload,
         UserAvatar as UserAvatarPayload,
-        UserAvatarDecorationData,
+        AvatarDecorationData,
+        PrimaryGuild as PrimaryGuildPayload,
+        DisplayNameStyle as DisplayNameStylePayload,
+        UserCollectibles as UserCollectiblesPayload,
     )
     from .types.snowflake import Snowflake
 
@@ -79,172 +84,38 @@ if TYPE_CHECKING:
 __all__ = (
     'User',
     'ClientUser',
-    'Note',
     'RecentAvatar',
+    'DisplayNameStyle',
 )
-
-
-class Note:
-    """Represents a Discord note.
-
-    .. container:: operations
-
-        .. describe:: x == y
-            Checks if two notes are equal.
-
-        .. describe:: x != y
-            Checks if two notes are not equal.
-
-        .. describe:: hash(x)
-            Returns the note's hash.
-
-        .. describe:: str(x)
-            Returns the note's content.
-            Raises :exc:`ClientException` if the note is not fetched.
-
-        .. describe:: bool(x)
-            Returns the note's content as a boolean.
-
-        .. describe:: len(x)
-            Returns the note's length.
-
-    .. versionadded:: 1.9
-
-    Attributes
-    -----------
-    user_id: :class:`int`
-        The user ID the note is for.
-    """
-
-    __slots__ = ('_state', '_value', 'user_id', '_user')
-
-    def __init__(
-        self, state: ConnectionState, user_id: int, *, user: Optional[User] = None, note: Optional[str] = MISSING
-    ) -> None:
-        self._state = state
-        self._value: Optional[str] = note
-        self.user_id: int = user_id
-        self._user: Optional[User] = user
-
-    @property
-    def note(self) -> Optional[str]:
-        """Optional[:class:`str`]: Returns the note.
-
-        There is an alias for this called :attr:`value`.
-
-        Raises
-        -------
-        ClientException
-            Attempted to access note without fetching it.
-        """
-        if self._value is MISSING:
-            raise ClientException('Note is not fetched')
-        return self._value
-
-    @property
-    def value(self) -> Optional[str]:
-        """Optional[:class:`str`]: Returns the note.
-
-        This is an alias of :attr:`note`.
-
-        Raises
-        -------
-        ClientException
-            Attempted to access note without fetching it.
-        """
-        return self.note
-
-    @property
-    def user(self) -> Optional[User]:
-        """Optional[:class:`User`]: Returns the user the note belongs to."""
-        return self._state.get_user(self.user_id) or self._user
-
-    async def fetch(self) -> Optional[str]:
-        """|coro|
-
-        Retrieves the note.
-
-        Raises
-        -------
-        HTTPException
-            Fetching the note failed.
-
-        Returns
-        --------
-        Optional[:class:`str`]
-            The note or ``None`` if it doesn't exist.
-        """
-        try:
-            data = await self._state.http.get_note(self.user_id)
-            self._value = data['note']
-            return data['note']
-        except NotFound:
-            # A 404 means the note doesn't exist
-            # However, this is bad UX, so we just return None
-            self._value = None
-            return None
-
-    async def edit(self, note: Optional[str]) -> None:
-        """|coro|
-
-        Modifies the note. Can be at most 256 characters.
-
-        Raises
-        -------
-        HTTPException
-            Changing the note failed.
-        """
-        await self._state.http.set_note(self.user_id, note=note)
-        self._value = note or ''
-
-    async def delete(self) -> None:
-        """|coro|
-
-        A shortcut to :meth:`.edit` that deletes the note.
-
-        Raises
-        -------
-        HTTPException
-            Deleting the note failed.
-        """
-        await self.edit(None)
-
-    def __repr__(self) -> str:
-        base = f'<Note user={self.user!r}'
-        note = self._value
-        if note is not MISSING:
-            note = note or ''
-            return f'{base} note={note!r}>'
-        return f'{base}>'
-
-    def __str__(self) -> str:
-        note = self._value
-        if note is MISSING:
-            raise ClientException('Note is not fetched')
-        return note or ''
-
-    def __bool__(self) -> bool:
-        return bool(str(self))
-
-    def __eq__(self, other: object) -> bool:
-        return isinstance(other, Note) and self.user_id == other.user_id
-
-    def __ne__(self, other: object) -> bool:
-        if isinstance(other, Note):
-            return self._value != other._value or self.user_id != other.user_id
-        return True
-
-    def __hash__(self) -> int:
-        return hash((self._value, self.user_id))
-
-    def __len__(self) -> int:
-        note = str(self)
-        return len(note) if note else 0
 
 
 class _UserTag:
     __slots__ = ()
     id: int
+
+
+class DisplayNameStyle:
+    """Represents a user's display name style.
+
+    .. versionadded:: 2.1
+
+    Attributes
+    -----------
+    font: :class:`NameFont`
+        The font used for the display name.
+    effect: :class:`NameEffect`
+        The visual effect applied to the display name.
+    colors: List[:class:`Colour`]
+        The list of colours applied to the display name.
+    """
+
+    def __init__(self, *, data: DisplayNameStylePayload) -> None:
+        self.font: NameFont = try_enum(NameFont, data['font_id'])
+        self.effect: NameEffect = try_enum(NameEffect, data['effect_id'])
+        self.colors: List[discord.Colour] = [discord.Colour(color) for color in data.get('colors', [])]
+
+    def __repr__(self) -> str:
+        return f'<DisplayNameStyle font={self.font} effect={self.effect} colors={self.colors}>'
 
 
 class BaseUser(_UserTag):
@@ -254,17 +125,16 @@ class BaseUser(_UserTag):
         'discriminator',
         'global_name',
         '_avatar',
-        '_avatar_decoration',
-        '_avatar_decoration_sku_id',
-        '_avatar_decoration_expires_at',
+        '_avatar_decoration_data',
         '_banner',
         '_accent_colour',
         'bot',
         'system',
         '_public_flags',
-        'premium_type',
-        '_cs_note',
         '_state',
+        '_primary_guild',
+        '_display_name_style',
+        '_collectibles',
     )
 
     if TYPE_CHECKING:
@@ -274,15 +144,15 @@ class BaseUser(_UserTag):
         global_name: Optional[str]
         bot: bool
         system: bool
-        premium_type: Optional[PremiumType]
         _state: ConnectionState
         _avatar: Optional[str]
-        _avatar_decoration: Optional[str]
-        _avatar_decoration_sku_id: Optional[int]
-        _avatar_decoration_expires_at: Optional[int]
+        _avatar_decoration_data: Optional[AvatarDecorationData]
         _banner: Optional[str]
         _accent_colour: Optional[int]
         _public_flags: int
+        _primary_guild: Optional[PrimaryGuildPayload]
+        _display_name_style: Optional[DisplayNameStylePayload]
+        _collectibles: Optional[UserCollectiblesPayload]
 
     def __init__(self, *, state: ConnectionState, data: Union[UserPayload, PartialUserPayload]) -> None:
         self._state = state
@@ -290,8 +160,8 @@ class BaseUser(_UserTag):
 
     def __repr__(self) -> str:
         return (
-            f"<BaseUser id={self.id} name={self.name!r} global_name={self.global_name!r}"
-            f" bot={self.bot} system={self.system}>"
+            f'<BaseUser id={self.id} name={self.name!r} global_name={self.global_name!r}'
+            f' bot={self.bot} system={self.system}>'
         )
 
     def __str__(self) -> str:
@@ -314,17 +184,15 @@ class BaseUser(_UserTag):
         self.discriminator = data['discriminator']
         self.global_name = data.get('global_name')
         self._avatar = data['avatar']
+        self._avatar_decoration_data = data.get('avatar_decoration_data')
         self._banner = data.get('banner', None)
         self._accent_colour = data.get('accent_color', None)
         self._public_flags = data.get('public_flags', 0)
-        self.premium_type = try_enum(PremiumType, data['premium_type'] or 0) if 'premium_type' in data else None
         self.bot = data.get('bot', False)
         self.system = data.get('system', False)
-
-        decoration_data = data.get('avatar_decoration_data')
-        self._avatar_decoration = decoration_data.get('asset') if decoration_data else None
-        self._avatar_decoration_sku_id = _get_as_snowflake(decoration_data, 'sku_id') if decoration_data else None
-        self._avatar_decoration_expires_at = decoration_data.get('expires_at') if decoration_data else None
+        self._primary_guild = data.get('primary_guild', None)
+        self._display_name_style = data.get('display_name_styles', None) or None
+        self._collectibles = data.get('collectibles', None)
 
     @classmethod
     def _copy(cls, user: Self) -> Self:
@@ -335,32 +203,25 @@ class BaseUser(_UserTag):
         self.discriminator = user.discriminator
         self.global_name = user.global_name
         self._avatar = user._avatar
-        self._avatar_decoration = user._avatar_decoration
-        self._avatar_decoration_sku_id = user._avatar_decoration_sku_id
-        self._avatar_decoration_expires_at = user._avatar_decoration_expires_at
+        self._avatar_decoration_data = user._avatar_decoration_data
         self._banner = user._banner
         self._accent_colour = user._accent_colour
         self._public_flags = user._public_flags
         self.bot = user.bot
         self.system = user.system
         self._state = user._state
+        self._primary_guild = user._primary_guild
+        self._display_name_style = user._display_name_style
+        self._collectibles = user._collectibles
 
         return self
 
     def _to_minimal_user_json(self) -> APIUserPayload:
-        decoration: Optional[UserAvatarDecorationData] = None
-        if self._avatar_decoration is not None:
-            decoration = {
-                'asset': self._avatar_decoration,
-                'sku_id': self._avatar_decoration_sku_id,  # type: ignore
-                'expires_at': self._avatar_decoration_expires_at,
-            }
-
         user: APIUserPayload = {
             'username': self.name,
             'id': self.id,
             'avatar': self._avatar,
-            'avatar_decoration_data': decoration,
+            'avatar_decoration_data': self._avatar_decoration_data,
             'discriminator': self.discriminator,
             'global_name': self.global_name,
             'bot': self.bot,
@@ -368,10 +229,10 @@ class BaseUser(_UserTag):
             'public_flags': self._public_flags,
             'banner': self._banner,
             'accent_color': self._accent_colour,
+            'primary_guild': self._primary_guild,
+            'display_name_styles': self._display_name_style,
+            'collectibles': self._collectibles,
         }
-        if self.premium_type is not None:
-            user['premium_type'] = self.premium_type.value
-
         return user
 
     @property
@@ -416,43 +277,37 @@ class BaseUser(_UserTag):
         return self.avatar or self.default_avatar
 
     @property
-    def premium(self) -> bool:
-        """Indicates if the user is a premium user (i.e. has Discord Nitro)."""
-        return bool(self.premium_type.value) if self.premium_type else False
-
-    @property
     def avatar_decoration(self) -> Optional[Asset]:
         """Optional[:class:`Asset`]: Returns an :class:`Asset` for the avatar decoration the user has.
 
-        If the user does not have a avatar decoration, ``None`` is returned.
+        If the user does not have an avatar decoration, ``None`` is returned.
 
         .. versionadded:: 2.0
         """
-        if self._avatar_decoration is not None:
-            return Asset._from_avatar_decoration(self._state, self._avatar_decoration)
-        return None
+        if self._avatar_decoration_data is not None:
+            return Asset._from_avatar_decoration(self._state, self._avatar_decoration_data['asset'])
 
     @property
     def avatar_decoration_sku_id(self) -> Optional[int]:
         """Optional[:class:`int`]: Returns the avatar decoration's SKU ID.
 
-        If the user does not have a preset avatar decoration, ``None`` is returned.
+        If the user does not have an avatar decoration, ``None`` is returned.
 
         .. versionadded:: 2.1
         """
-        return self._avatar_decoration_sku_id
+        if self._avatar_decoration_data:
+            return _get_as_snowflake(self._avatar_decoration_data, 'sku_id')
 
     @property
-    def avatar_decoration_expires_at(self) -> Optional[datetime]:
+    def avatar_decoration_expires_at(self) -> Optional[datetime.datetime]:
         """Optional[:class:`datetime.datetime`]: Returns the avatar decoration's expiration time.
 
         If the user does not have an expiring avatar decoration, ``None`` is returned.
 
         .. versionadded:: 2.1
         """
-        if self._avatar_decoration_expires_at is None:
-            return None
-        return parse_timestamp(self._avatar_decoration_expires_at, ms=False)
+        if self._avatar_decoration_data:
+            return parse_timestamp(self._avatar_decoration_data.get('expires_at'), ms=False)
 
     @property
     def banner(self) -> Optional[Asset]:
@@ -537,7 +392,7 @@ class BaseUser(_UserTag):
         return f'<@{self.id}>'
 
     @property
-    def created_at(self) -> datetime:
+    def created_at(self) -> datetime.datetime:
         """:class:`datetime.datetime`: Returns the user's creation time in UTC.
 
         This is when the user's Discord account was created.
@@ -556,17 +411,34 @@ class BaseUser(_UserTag):
             return self.global_name
         return self.name
 
-    @cached_slot_property('_cs_note')
-    def note(self) -> Note:
-        """:class:`Note`: Returns an object representing the user's note.
+    @property
+    def primary_guild(self) -> PrimaryGuild:
+        """:class:`PrimaryGuild`: Returns the user's primary guild.
 
-        .. versionadded:: 2.0
-
-        .. note::
-
-            The underlying note is cached and updated from gateway events.
+        .. versionadded:: 2.1
         """
-        return Note(self._state, self.id, user=self)  # type: ignore
+        if self._primary_guild is not None:
+            return PrimaryGuild(state=self._state, data=self._primary_guild)
+        return PrimaryGuild._default(self._state)
+
+    @property
+    def display_name_style(self) -> Optional[DisplayNameStyle]:
+        """:class:`DisplayNameStyle`: Returns the user's display name style.
+
+        .. versionadded:: 2.1
+        """
+        if self._display_name_style is None:
+            return None
+        return DisplayNameStyle(data=self._display_name_style)
+
+    def collectibles(self) -> List[Collectible]:
+        """List[:class:`Collectible`]: Returns a list of the user's collectibles.
+
+        .. versionadded:: 2.1
+        """
+        if self._collectibles is None:
+            return []
+        return [Collectible(state=self._state, type=key, data=value) for key, value in self._collectibles.items() if value]  # type: ignore
 
     def mentioned_in(self, message: Message) -> bool:
         """Checks if the user is mentioned in the specified message.
@@ -618,7 +490,6 @@ class BaseUser(_UserTag):
         with_mutual_guilds: bool = True,
         with_mutual_friends_count: bool = False,
         with_mutual_friends: bool = True,
-        friend_token: str = MISSING,
     ) -> UserProfile:
         """|coro|
 
@@ -641,10 +512,6 @@ class BaseUser(_UserTag):
             This fills in :attr:`UserProfile.mutual_friends` and :attr:`UserProfile.mutual_friends_count`.
 
             .. versionadded:: 2.0
-        friend_token: :class:`str`
-            The friend token to use for fetching the profile.
-
-            .. versionadded:: 2.1
 
         Raises
         -------
@@ -664,7 +531,6 @@ class BaseUser(_UserTag):
             with_mutual_guilds=with_mutual_guilds,
             with_mutual_friends_count=with_mutual_friends_count,
             with_mutual_friends=with_mutual_friends,
-            friend_token=friend_token,
         )
 
     async def fetch_mutual_friends(self) -> List[User]:
@@ -687,6 +553,63 @@ class BaseUser(_UserTag):
         state = self._state
         data = await state.http.get_mutual_friends(self.id)
         return [state.store_user(u) for u in data]
+
+    async def fetch_note(self) -> Optional[str]:
+        """|coro|
+
+        Fetches the user's note.
+
+        .. versionadded:: 2.1
+
+        Raises
+        -------
+        HTTPException
+            Fetching the note failed.
+
+        Returns
+        --------
+        Optional[:class:`str`]
+            The user's note, or ``None`` if no note exists.
+        """
+        try:
+            data = await self._state.http.get_note(self.id)
+        except NotFound:
+            # Bad UX to propagate the 404 for unknown notes
+            return None
+        return data.get('note')
+
+    async def edit_note(self, note: Optional[str], /) -> None:
+        """|coro|
+
+        Edits the user's note.
+
+        .. versionadded:: 2.1
+
+        Parameters
+        -----------
+        note: Optional[:class:`str`]
+            The new note to set for the user.
+
+        Raises
+        -------
+        HTTPException
+            Editing the note failed.
+        """
+        await self._state.http.set_note(self.id, note)
+
+    async def delete_note(self) -> None:
+        """|coro|
+
+        Deletes the user's note.
+
+        .. versionadded:: 2.1
+
+        Raises
+        -------
+        HTTPException
+            Deleting the note failed.
+        """
+        await self._state.http.set_note(self.id, '')
 
 
 class ClientUser(BaseUser):
@@ -711,7 +634,12 @@ class ClientUser(BaseUser):
             Returns the user's handle (e.g. ``name`` or ``name#discriminator``).
 
     .. versionchanged:: 2.0
+
         :attr:`Locale` is now a :class:`Locale` instead of a Optional[:class:`str`].
+
+    .. versionchanged:: 2.1
+
+        Removed the ``note`` attribute. See :meth:`fetch_note` and :meth:`edit_note` instead.
 
     Attributes
     -----------
@@ -753,10 +681,6 @@ class ClientUser(BaseUser):
         .. versionchanged:: 2.1
 
             This is now :attr:`PremiumType.none` instead of ``None`` if the user is not premium.
-    note: :class:`Note`
-        The user's note. Not pre-fetched.
-
-        .. versionadded:: 1.9
     nsfw_allowed: Optional[:class:`bool`]
         Specifies if the user should be allowed to access NSFW content.
         If ``None``, then the user's date of birth is not known.
@@ -778,9 +702,9 @@ class ClientUser(BaseUser):
         '_flags',
         'verified',
         'mfa_enabled',
+        'premium_type',
         'email',
         'phone',
-        'note',
         'bio',
         'nsfw_allowed',
         'desktop',
@@ -803,7 +727,10 @@ class ClientUser(BaseUser):
     def __init__(self, *, state: ConnectionState, data: UserPayload) -> None:
         self._state = state
         self._full_update(data)
-        self.note: Note = Note(state, self.id)
+
+        # These are only supplied by the Gateway
+        self.desktop: bool = False
+        self.mobile: bool = False
 
     def __repr__(self) -> str:
         return (
@@ -824,8 +751,12 @@ class ClientUser(BaseUser):
         self.premium_type = try_enum(PremiumType, data.get('premium_type') or 0)
         self.bio = data.get('bio') or None
         self.nsfw_allowed = data.get('nsfw_allowed')
-        self.desktop: bool = data.get('desktop', False)
-        self.mobile: bool = data.get('mobile', False)
+
+        try:
+            self.desktop = data['desktop']  # type: ignore
+            self.mobile = data['mobile']  # type: ignore
+        except KeyError:
+            pass
 
     def _update_self(self, *args: Any) -> None:
         # ClientUser is kept up to date by USER_UPDATEs only
@@ -835,6 +766,11 @@ class ClientUser(BaseUser):
     def locale(self) -> Locale:
         """:class:`Locale`: The IETF language tag used to identify the language the user is using."""
         return self._state.settings.locale if self._state.settings else try_enum(Locale, self._locale)
+
+    @property
+    def premium(self) -> bool:
+        """Indicates if the user is a premium user (i.e. has Discord Nitro)."""
+        return bool(self.premium_type.value)
 
     @property
     def flags(self) -> PrivateUserFlags:
@@ -877,8 +813,9 @@ class ClientUser(BaseUser):
         accent_colour: Colour = MISSING,
         accent_color: Colour = MISSING,
         bio: Optional[str] = MISSING,
-        date_of_birth: datetime = MISSING,
+        date_of_birth: datetime.date = MISSING,
         pomelo: bool = MISSING,
+        primary_guild: Optional[discord.abc.Snowflake] = MISSING,
     ) -> ClientUser:
         """|coro|
 
@@ -940,7 +877,7 @@ class ClientUser(BaseUser):
             Could be ``None`` to represent no bio.
 
             .. versionadded:: 2.0
-        date_of_birth: :class:`datetime.datetime`
+        date_of_birth: :class:`datetime.date`
             Your date of birth. Can only ever be set once.
 
             .. versionadded:: 2.0
@@ -949,13 +886,25 @@ class ClientUser(BaseUser):
 
             .. note::
 
-                This change cannot be undone and requires you to be in the pomelo rollout.
+                This change cannot be undone.
 
             .. versionadded:: 2.1
         global_name: Optional[:class:`str`]
             The new global display name you wish to change to.
 
             .. versionadded:: 2.1
+        primary_guild: Optional[:class:`discord.abc.Snowflake`]
+            A :class:`discord.abc.Snowflake` object representing the primary guild to set on your profile.
+
+            The behaviour of this parameters is as follows:
+
+            - If a :class:`PrimaryGuild` object is passed, then the guild ID and whether the identity is
+                enabled are taken from that object.
+            - If a :class:`discord.abc.Snowflake` object is passed, then the guild ID is taken from that
+                object and the identity is enabled.
+            - If ``None`` is passed, then the primary guild is removed and the identity is disabled.
+
+            .. versionadded:: 2.2
 
         Raises
         ------
@@ -967,8 +916,9 @@ class ClientUser(BaseUser):
             Discriminator was passed when migrated to pomelo.
             Password was not passed when it was required.
             `house` field was not a :class:`HypeSquadHouse`.
-            `date_of_birth` field was not a :class:`datetime.datetime`.
+            `date_of_birth` field was not a :class:`datetime.date`.
             `accent_colo(u)r` parameter was not a :class:`Colour`.
+            `primary_guild` parameter was not a :class:`discord.abc.Snowflake`.
 
         Returns
         ---------
@@ -1045,7 +995,7 @@ class ClientUser(BaseUser):
             args['bio'] = bio or ''
 
         if date_of_birth is not MISSING:
-            if not isinstance(date_of_birth, datetime):
+            if not isinstance(date_of_birth, datetime.date):
                 raise ValueError('`date_of_birth` parameter was not a datetime')
             args['date_of_birth'] = date_of_birth.strftime('%F')
 
@@ -1059,6 +1009,20 @@ class ClientUser(BaseUser):
             else:
                 await http.change_hypesquad_house(house.value)
 
+        if primary_guild is not MISSING:
+            if primary_guild is None:
+                primary_guild_id = None
+                primary_guild_enabled = False
+            elif not isinstance(primary_guild, discord.abc.Snowflake):
+                raise ValueError('`primary_guild` parameter was not an abc.Snowflake')
+            else:
+                primary_guild_id = primary_guild.id
+                primary_guild_enabled = True
+            if isinstance(primary_guild, PrimaryGuild):
+                primary_guild_enabled = primary_guild.identity_enabled
+
+            data = await http.set_guild_identity(guild_id=primary_guild_id, enabled=primary_guild_enabled)
+
         if args or data is None:
             data = await http.edit_profile(args)
             try:
@@ -1066,7 +1030,7 @@ class ClientUser(BaseUser):
             except KeyError:
                 pass
 
-        return ClientUser(state=self._state, data=data)  # type: ignore # ???
+        return self.__class__(state=self._state, data=data)  # type: ignore # ???
 
 
 class User(BaseUser, discord.abc.Connectable, discord.abc.Messageable):
@@ -1090,6 +1054,10 @@ class User(BaseUser, discord.abc.Connectable, discord.abc.Messageable):
 
             Returns the user's handle (e.g. ``name`` or ``name#discriminator``).
 
+    .. versionchanged:: 2.1
+
+        Removed the ``note`` attribute. See :meth:`fetch_note` and :meth:`edit_note` instead.
+
     Attributes
     -----------
     name: :class:`str`
@@ -1106,14 +1074,6 @@ class User(BaseUser, discord.abc.Connectable, discord.abc.Messageable):
         Specifies if the user is a bot account.
     system: :class:`bool`
         Specifies if the user is a system user (i.e. represents Discord officially).
-    premium_type: Optional[:class:`PremiumType`]
-        Specifies the type of premium a user has (i.e. Nitro, Nitro Classic, or Nitro Basic).
-
-        .. note::
-
-            This information is only available in certain contexts.
-
-        .. versionadded:: 2.1
     """
 
     __slots__ = ('__weakref__',)
@@ -1136,16 +1096,22 @@ class User(BaseUser, discord.abc.Connectable, discord.abc.Messageable):
             self._avatar,
             self.discriminator,
             self._public_flags,
-            self._avatar_decoration,
+            self._avatar_decoration_data,
             self.global_name,
+            self._primary_guild,
+            self._display_name_style,
+            self._collectibles,
         )
         modified = (
             user['username'],
             user.get('avatar'),
             user['discriminator'],
             user.get('public_flags', 0),
-            (user.get('avatar_decoration_data') or {}).get('asset'),
+            user.get('avatar_decoration_data'),
             user.get('global_name'),
+            user.get('primary_guild'),
+            user.get('display_name_styles'),
+            user.get('collectibles'),
         )
         if original != modified:
             to_return = User._copy(self)
@@ -1154,8 +1120,11 @@ class User(BaseUser, discord.abc.Connectable, discord.abc.Messageable):
                 self._avatar,
                 self.discriminator,
                 self._public_flags,
-                self._avatar_decoration,
+                self._avatar_decoration_data,
                 self.global_name,
+                self._primary_guild,
+                self._display_name_style,
+                self._collectibles,
             ) = modified
             # Signal to dispatch user_update
             return to_return, self
@@ -1259,18 +1228,10 @@ class User(BaseUser, discord.abc.Connectable, discord.abc.Messageable):
         """
         await self._state.http.remove_relationship(self.id, action=RelationshipAction.unfriend)
 
-    async def send_friend_request(self, *, friend_token: str = MISSING) -> None:
+    async def send_friend_request(self) -> None:
         """|coro|
 
         Sends the user a friend request.
-
-        Parameters
-        -----------
-        friend_token: :class:`str`
-            The friend token to use for sending the friend request.
-            This will bypass the user's friend request settings.
-
-            .. versionadded:: 2.1
 
         Raises
         -------
@@ -1279,9 +1240,7 @@ class User(BaseUser, discord.abc.Connectable, discord.abc.Messageable):
         HTTPException
             Sending the friend request failed.
         """
-        await self._state.http.add_relationship(
-            self.id, friend_token=friend_token or None, action=RelationshipAction.send_friend_request
-        )
+        await self._state.http.add_relationship(self.id, action=RelationshipAction.send_friend_request)
 
 
 class RecentAvatar(AssetMixin, Hashable):

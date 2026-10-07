@@ -32,7 +32,6 @@ from .flags import InviteFlags
 from .mixins import Hashable
 from .object import Object
 from .scheduled_event import ScheduledEvent
-from .stage_instance import StageInstance
 from .utils import MISSING, _generate_session_id, _get_as_snowflake, parse_time, snowflake_time
 from .welcome_screen import WelcomeScreen
 
@@ -50,6 +49,7 @@ if TYPE_CHECKING:
     from .abc import GuildChannel, Snowflake
     from .application import PartialApplication
     from .channel import DMChannel, GroupChannel
+    from .discovery import GuildProfile
     from .guild import Guild
     from .message import Message
     from .state import ConnectionState
@@ -59,11 +59,6 @@ if TYPE_CHECKING:
         Invite as InvitePayload,
         InviteGuild as InviteGuildPayload,
     )
-    from .types.channel import (
-        PartialChannel as InviteChannelPayload,
-    )
-    from .state import ConnectionState
-    from .abc import GuildChannel
     from .user import User
 
     InviteGuildType = Union[Guild, 'PartialInviteGuild', Object]
@@ -213,6 +208,11 @@ class PartialInviteGuild:
         The number of "boosts" the partial guild currently has.
 
         .. versionadded:: 2.0
+    premium_tier: :class:`int`
+        The premium tier for this guild. Corresponds to "Server Boost Level" in the official UI.
+        The number goes from 0 to 3 inclusive.
+
+        .. versionadded:: 2.1
     """
 
     __slots__ = (
@@ -228,6 +228,7 @@ class PartialInviteGuild:
         'vanity_url_code',
         'nsfw_level',
         'premium_subscription_count',
+        'premium_tier',
     )
 
     def __init__(self, state: ConnectionState, data: InviteGuildPayload, id: int):
@@ -243,6 +244,7 @@ class PartialInviteGuild:
         self.vanity_url_code: Optional[str] = data.get('vanity_url_code')
         self.nsfw_level: NSFWLevel = try_enum(NSFWLevel, data.get('nsfw_level', 0))
         self.premium_subscription_count: int = data.get('premium_subscription_count') or 0
+        self.premium_tier: int = data.get('premium_tier', 0)
 
     def __str__(self) -> str:
         return self.name
@@ -319,29 +321,37 @@ class Invite(Hashable):
 
     The following table illustrates what methods will obtain the attributes:
 
-    +------------------------------------+--------------------------------------------------------------+
-    |             Attribute              |                          Method                              |
-    +====================================+==============================================================+
-    | :attr:`max_age`                    | :meth:`abc.GuildChannel.invites`\, :meth:`Guild.invites`     |
-    +------------------------------------+--------------------------------------------------------------+
-    | :attr:`max_uses`                   | :meth:`abc.GuildChannel.invites`\, :meth:`Guild.invites`     |
-    +------------------------------------+--------------------------------------------------------------+
-    | :attr:`created_at`                 | :meth:`abc.GuildChannel.invites`\, :meth:`Guild.invites`     |
-    +------------------------------------+--------------------------------------------------------------+
-    | :attr:`temporary`                  | :meth:`abc.GuildChannel.invites`\, :meth:`Guild.invites`     |
-    +------------------------------------+--------------------------------------------------------------+
-    | :attr:`uses`                       | :meth:`abc.GuildChannel.invites`\, :meth:`Guild.invites`     |
-    +------------------------------------+--------------------------------------------------------------+
-    | :attr:`approximate_member_count`   | :meth:`Client.fetch_invite` with ``with_counts`` enabled     |
-    +------------------------------------+--------------------------------------------------------------+
-    | :attr:`approximate_presence_count` | :meth:`Client.fetch_invite` with ``with_counts`` enabled     |
-    +------------------------------------+--------------------------------------------------------------+
+    +------------------------------------+---------------------------------------------------------------+
+    |             Attribute              |                          Method                               |
+    +====================================+===============================================================+
+    | :attr:`max_age`                    | :meth:`abc.GuildChannel.invites`\, :meth:`Guild.invites`      |
+    +------------------------------------+---------------------------------------------------------------+
+    | :attr:`max_uses`                   | :meth:`abc.GuildChannel.invites`\, :meth:`Guild.invites`      |
+    +------------------------------------+---------------------------------------------------------------+
+    | :attr:`created_at`                 | :meth:`abc.GuildChannel.invites`\, :meth:`Guild.invites`      |
+    +------------------------------------+---------------------------------------------------------------+
+    | :attr:`temporary`                  | :meth:`abc.GuildChannel.invites`\, :meth:`Guild.invites`      |
+    +------------------------------------+---------------------------------------------------------------+
+    | :attr:`uses`                       | :meth:`abc.GuildChannel.invites`\, :meth:`Guild.invites`      |
+    +------------------------------------+---------------------------------------------------------------+
+    | :attr:`approximate_member_count`   | :meth:`Client.fetch_invite` with ``with_counts`` enabled      |
+    +------------------------------------+---------------------------------------------------------------+
+    | :attr:`approximate_presence_count` | :meth:`Client.fetch_invite` with ``with_counts`` enabled      |
+    +------------------------------------+---------------------------------------------------------------+
+    | :attr:`is_nickname_changeable`     | :meth:`Client.fetch_invite` with ``with_permissions`` enabled |
+    +------------------------------------+---------------------------------------------------------------+
+    | :attr:`profile`                    | :meth:`Client.fetch_invite` with ``with_profile`` enabled     |
+    +------------------------------------+---------------------------------------------------------------+
+    | :attr:`new_member`                 | :meth:`Client.accept_invite`\, :meth:`Invite.use`             |
+    +------------------------------------+---------------------------------------------------------------+
+    | :attr:`show_verification_form`     | :meth:`Client.accept_invite`\, :meth:`Invite.use`             |
+    +------------------------------------+---------------------------------------------------------------+
 
     If it's not in the table above then it is available by all methods.
 
     .. versionchanged:: 2.1
 
-    The ``revoked`` attribute has been removed.
+        The ``revoked`` attribute has been removed.
 
     Attributes
     -----------
@@ -356,6 +366,10 @@ class Invite(Hashable):
         .. versionadded:: 2.0
     guild: Optional[Union[:class:`Guild`, :class:`Object`, :class:`PartialInviteGuild`]]
         The guild the invite is for. Can be ``None`` if not a guild invite.
+    profile: Optional[:class:`GuildProfile`]
+        The profile of the guild this invite is for, if available.
+
+        .. versionadded:: 2.2
     created_at: Optional[:class:`datetime.datetime`]
         An aware UTC datetime object denoting the time the invite was created.
     temporary: Optional[:class:`bool`]
@@ -374,8 +388,7 @@ class Invite(Hashable):
         The approximate number of members currently active in the guild.
         This includes idle, dnd, online, and invisible members. Offline members are excluded.
     expires_at: Optional[:class:`datetime.datetime`]
-        The expiration date of the invite. If the value is ``None`` (unless received through
-        :meth:`Client.fetch_invite` with ``with_expiration`` disabled), the invite will never expire.
+        The expiration date of the invite. If the value is ``None``, the invite will never expire.
 
         .. versionadded:: 2.0
     channel: Optional[Union[:class:`abc.GuildChannel`, :class:`GroupChannel`, :class:`Object`, :class:`PartialInviteChannel`]]
@@ -404,6 +417,10 @@ class Invite(Hashable):
         The guild's welcome screen, if available.
 
         .. versionadded:: 2.0
+    is_nickname_changeable: Optional[:class:`bool`]
+        Whether the guild grants @everyone the permission to change their nickname.
+
+        .. versionadded:: 2.1
     new_member: :class:`bool`
         Whether the user was not previously a member of the guild.
 
@@ -428,6 +445,7 @@ class Invite(Hashable):
         'max_age',
         'code',
         'guild',
+        'profile',
         'created_at',
         'uses',
         'temporary',
@@ -439,11 +457,11 @@ class Invite(Hashable):
         '_state',
         'approximate_member_count',
         'approximate_presence_count',
+        'is_nickname_changeable',
         'target_application',
         'expires_at',
         'scheduled_event',
         'scheduled_event_id',
-        'stage_instance',
         '_message',
         'welcome_screen',
         'type',
@@ -469,12 +487,20 @@ class Invite(Hashable):
         self.max_age: Optional[int] = data.get('max_age')
         self.code: str = data['code']
         self.guild: Optional[InviteGuildType] = self._resolve_guild(data.get('guild'), guild)
+        profile = data.get('profile')
+        if profile is not None:
+            from .discovery import GuildProfile
+
+            self.profile: Optional[GuildProfile] = GuildProfile(state=state, data=profile)
+        else:
+            self.profile = None
         self.created_at: Optional[datetime.datetime] = parse_time(data.get('created_at'))
         self.temporary: Optional[bool] = data.get('temporary')
         self.uses: Optional[int] = data.get('uses')
         self.max_uses: Optional[int] = data.get('max_uses')
         self.approximate_presence_count: Optional[int] = data.get('approximate_presence_count')
         self.approximate_member_count: Optional[int] = data.get('approximate_member_count')
+        self.is_nickname_changeable: Optional[bool] = data.get('is_nickname_changeable')
         self._flags: int = data.get('flags', 0)
         self._message: Optional[Message] = message
 
@@ -495,7 +521,7 @@ class Invite(Hashable):
         target_user_data = data.get('target_user')
         self.target_user: Optional[User] = None if target_user_data is None else self._state.create_user(target_user_data)
 
-        self.target_type: InviteTarget = try_enum(InviteTarget, data.get("target_type", 0))
+        self.target_type: InviteTarget = try_enum(InviteTarget, data.get('target_type', 0))
 
         application = data.get('target_application')
         if application is not None:
@@ -517,11 +543,6 @@ class Invite(Hashable):
         )
         self.scheduled_event_id: Optional[int] = self.scheduled_event.id if self.scheduled_event else None
 
-        stage_instance = data.get('stage_instance')
-        self.stage_instance: Optional[StageInstance] = (
-            StageInstance.from_invite(self, stage_instance) if stage_instance else None
-        )
-
         # Only present on accepted invites
         self.new_member: bool = data.get('new_member', False)
         self.show_verification_form: bool = data.get('show_verification_form', False)
@@ -530,7 +551,7 @@ class Invite(Hashable):
     def from_incomplete(cls, *, state: ConnectionState, data: InvitePayload, message: Optional[Message] = None) -> Self:
         guild: Optional[Union[Guild, PartialInviteGuild]]
         try:
-            guild_data = data['guild']
+            guild_data = data['guild']  # pyright: ignore[reportTypedDictNotRequiredAccess]
         except KeyError:
             # If we're here, then this is a group DM
             guild = None
@@ -597,11 +618,7 @@ class Invite(Hashable):
         return self.url
 
     def __repr__(self) -> str:
-        return (
-            f'<Invite code={self.code!r} type={self.type!r} '
-            f'guild={self.guild!r} '
-            f'members={self.approximate_member_count}>'
-        )
+        return f'<Invite code={self.code!r} type={self.type!r} guild={self.guild!r} members={self.approximate_member_count}>'
 
     def __hash__(self) -> int:
         return hash(self.code)
@@ -664,6 +681,8 @@ class Invite(Hashable):
         ------
         HTTPException
             Using the invite failed.
+        ValueError
+            Attempted to accept a guest invite without a session.
 
         Returns
         -------
@@ -671,6 +690,9 @@ class Invite(Hashable):
             The accepted invite.
         """
         state = self._state
+        if self.flags.guest and not state.session_id:
+            raise ValueError('Cannot accept guest invites without a session')
+
         type = self.type
         kwargs = {}
         if not self._message:
@@ -698,6 +720,8 @@ class Invite(Hashable):
         ------
         HTTPException
             Using the invite failed.
+        ValueError
+            Attempted to accept a guest invite without a session.
 
         Returns
         -------

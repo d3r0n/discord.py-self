@@ -34,7 +34,7 @@ from typing import Dict, Optional, Tuple
 import aiohttp
 import curl_cffi
 import curl_cffi.requests.impersonate
-import discord_protos
+from discord_protos import __version__ as protos_version  # Avoid breaking selfcord
 
 import discord
 
@@ -50,9 +50,19 @@ def show_version() -> None:
         if version:
             entries.append(f'    - discord.py-self metadata: v{version}')
 
-    entries.append(f'    - discord-protos v{discord_protos.__version__}')
-    entries.append(f'- curl_cffi v{curl_cffi.__version__} (curl v{curl_cffi.__curl_version__} impersonating {curl_cffi.requests.impersonate.DEFAULT_CHROME})')  # type: ignore
+    entries.append(f'    - discord-protos v{protos_version}')
+    entries.append(
+        f'- curl_cffi v{curl_cffi.__version__} (curl v{curl_cffi.__curl_version__} impersonating {curl_cffi.requests.impersonate.DEFAULT_CHROME})'  # type: ignore
+    )
     entries.append(f'- aiohttp v{aiohttp.__version__}')
+
+    try:
+        import davey  # type: ignore
+    except ImportError:
+        entries.append('- davey not found')
+    else:
+        entries.append(f'- davey v{davey.__version__}')
+
     uname = platform.uname()
     entries.append('- system info: {0.system} {0.release} {0.version}'.format(uname))
     print('\n'.join(entries))
@@ -136,7 +146,7 @@ async def setup(bot):
     await bot.add_cog({name}(bot))
 '''
 
-_cog_extras = '''
+_cog_extras = """
     async def cog_load(self):
         # loading logic goes here
         pass
@@ -169,7 +179,7 @@ _cog_extras = '''
         # called after a command is called here
         pass
 
-'''
+"""
 
 
 # certain file names and directory names are forbidden
@@ -240,8 +250,6 @@ def to_path(parser: argparse.ArgumentParser, name: str, *, replace_spaces: bool 
 def newbot(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     new_directory = to_path(parser, args.directory) / to_path(parser, args.name)
 
-    # as a note exist_ok for Path is a 3.5+ only feature
-    # since we already checked above that we're >3.5
     try:
         new_directory.mkdir(exist_ok=True, parents=True)
     except OSError as exc:
